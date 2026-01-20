@@ -388,14 +388,56 @@ def get_all_status():
                 session = mqtt_sessions[device_id]
                 if session.get('data'):
                     print_data = session['data'].get('print', {})
+                    ams_data = print_data.get('ams', {})
+                    
                     result['realtime'] = {
+                        # Temperatures
                         'nozzle_temp': print_data.get('nozzle_temper'),
+                        'nozzle_target': print_data.get('nozzle_target_temper'),
                         'bed_temp': print_data.get('bed_temper'),
+                        'bed_target': print_data.get('bed_target_temper'),
+                        'chamber_temp': print_data.get('chamber_temper'),
+                        
+                        # Progress
                         'progress': print_data.get('mc_percent'),
                         'remaining_time': print_data.get('mc_remaining_time'),
                         'layer': print_data.get('layer_num'),
                         'total_layers': print_data.get('total_layer_num'),
+                        
+                        # State
                         'gcode_state': print_data.get('gcode_state'),
+                        'print_type': print_data.get('print_type'),
+                        'subtask_name': print_data.get('subtask_name'),
+                        'print_stage': print_data.get('mc_print_stage'),
+                        
+                        # Fans (0-15 scale, convert to percentage)
+                        'cooling_fan': int(print_data.get('cooling_fan_speed', '0') or '0') * 100 // 15 if print_data.get('cooling_fan_speed') else None,
+                        'heatbreak_fan': int(print_data.get('heatbreak_fan_speed', '0') or '0') * 100 // 15 if print_data.get('heatbreak_fan_speed') else None,
+                        'aux_fan': int(print_data.get('big_fan1_speed', '0') or '0') * 100 // 15 if print_data.get('big_fan1_speed') else None,
+                        
+                        # Speed
+                        'speed_mag': print_data.get('spd_mag'),
+                        'speed_level': print_data.get('spd_lvl'),
+                        
+                        # Hardware
+                        'wifi_signal': print_data.get('wifi_signal'),
+                        'nozzle_diameter': print_data.get('nozzle_diameter'),
+                        'nozzle_type': print_data.get('nozzle_type'),
+                        
+                        # Lights
+                        'lights': print_data.get('lights_report'),
+                        
+                        # Errors
+                        'print_error': print_data.get('print_error'),
+                        'hms': print_data.get('hms', []),
+                        
+                        # AMS
+                        'ams_exist': bool(ams_data.get('ams')),
+                        'ams_humidity': ams_data.get('ams', [{}])[0].get('humidity') if ams_data.get('ams') else None,
+                        'ams_temp': ams_data.get('ams', [{}])[0].get('temp') if ams_data.get('ams') else None,
+                        'current_tray': ams_data.get('tray_now'),
+                        
+                        # Timestamp
                         'last_update': session.get('timestamp'),
                     }
                 else:

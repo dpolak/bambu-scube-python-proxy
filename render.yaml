@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: bambu-mqtt-proxy
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
+    envVars:
+      - key: BAMBU_TOKEN
+        sync: false
+      - key: SCUBE_API_KEY
+        sync: false
+      - key: MQTT_SESSION_DURATION
+        value: 120
+    scaling:
+      minInstances: 1
+      maxInstances: 1

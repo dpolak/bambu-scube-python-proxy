@@ -45,7 +45,7 @@ CORS(app)
 BAMBU_TOKEN = os.getenv('BAMBU_TOKEN', '')
 SCUBE_API_KEY = os.getenv('SCUBE_API_KEY', 'scube-default-key')
 PORT = int(os.getenv('PORT', 5000))
-MQTT_SESSION_DURATION = int(os.getenv('MQTT_SESSION_DURATION', 120))
+MQTT_SESSION_DURATION = int(os.getenv('MQTT_SESSION_DURATION', 300))  # 5 minutes default
 
 # Rate limiting
 limiter = Limiter(
@@ -92,10 +92,28 @@ def mqtt_message_handler(device_id):
     """Factory function to create message handler for specific device."""
     def handler(dev_id, data):
         if device_id in mqtt_sessions:
-            mqtt_sessions[device_id]['data'] = data
+            # IMPORTANT: Merge new data with existing data, don't overwrite!
+            # MQTT messages are partial updates - they don't contain all fields every time
+            existing_data = mqtt_sessions[device_id].get('data', {})
+            
+            # Deep merge the print data
+            if 'print' in data:
+                if 'print' not in existing_data:
+                    existing_data['print'] = {}
+                # Merge new print fields into existing
+                for key, value in data['print'].items():
+                    if value is not None:  # Only update if value is not None
+                        existing_data['print'][key] = value
+            
+            # Merge other top-level keys
+            for key, value in data.items():
+                if key != 'print' and value is not None:
+                    existing_data[key] = value
+            
+            mqtt_sessions[device_id]['data'] = existing_data
             mqtt_sessions[device_id]['timestamp'] = time.time()
             mqtt_sessions[device_id]['message_count'] = mqtt_sessions[device_id].get('message_count', 0) + 1
-            logger.debug(f"MQTT data received for {device_id}")
+            logger.debug(f"MQTT data merged for {device_id} (total fields: {len(existing_data.get('print', {}))})")
     return handler
 
 
@@ -357,6 +375,8 @@ def get_all_status():
     if not BAMBU_TOKEN:
         return jsonify({'error': 'Bambu token not configured'}), 500
     
+    force_refresh = request.args.get('force') == 'true'
+    
     try:
         # Get device list from cloud
         client = BambuClient(BAMBU_TOKEN)
@@ -367,11 +387,25 @@ def get_all_status():
         for device in devices:
             device_id = device.get('dev_id')
             
-            # Start session if not exists
+            # Start session if not exists or expired
             if device_id not in mqtt_sessions:
                 start_mqtt_session(device_id)
-                # Give it a moment to connect
-                time.sleep(0.5)
+                # Give it a moment to connect and receive initial data
+                time.sleep(1.0)
+            else:
+                # Extend existing session
+                session = mqtt_sessions[device_id]
+                session['expires'] = time.time() + MQTT_SESSION_DURATION
+                
+                # Request fresh data if forced or data is stale (>30s old)
+                data_age = time.time() - (session.get('timestamp') or 0)
+                if force_refresh or data_age > 30:
+                    try:
+                        if session['client'].connected:
+                            session['client'].request_full_status()
+                            logger.debug(f"Requested pushall for {device_id} (data age: {data_age:.0f}s)")
+                    except Exception as e:
+                        logger.warning(f"Failed to request pushall for {device_id}: {e}")
             
             # Build result
             result = {
@@ -439,10 +473,13 @@ def get_all_status():
                         
                         # Timestamp
                         'last_update': session.get('timestamp'),
+                        'data_age_seconds': time.time() - session.get('timestamp') if session.get('timestamp') else None,
+                        'message_count': session.get('message_count', 0),
                     }
                 else:
                     result['realtime'] = None
                     result['realtime_status'] = 'waiting'
+                    result['session_age'] = time.time() - session.get('started', time.time())
             else:
                 result['realtime'] = None
                 result['realtime_status'] = 'no_session'
@@ -454,7 +491,8 @@ def get_all_status():
             'timestamp': time.time(),
             'devices': results,
             'count': len(results),
-            'active_sessions': len(mqtt_sessions)
+            'active_sessions': len(mqtt_sessions),
+            'session_duration': MQTT_SESSION_DURATION
         })
         
     except BambuAPIError as e:

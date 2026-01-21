@@ -59,6 +59,11 @@ limiter = Limiter(
 mqtt_sessions = {}  # device_id -> {'client': MQTTClient, 'data': {}, 'expires': timestamp}
 user_uid = None  # Cached user UID
 
+# Completed jobs tracking
+completed_jobs = []  # List of completed print jobs
+MAX_COMPLETED_JOBS = 50  # Maximum number of completed jobs to keep
+job_states = {}  # device_id -> last known gcode_state
+
 
 def get_user_uid():
     """Get or cache user UID from profile."""
@@ -88,9 +93,60 @@ def verify_api_key():
     return api_key == SCUBE_API_KEY
 
 
+def detect_job_completion(device_id, old_state, new_state, print_data):
+    """
+    Detect when a print job completes and store it.
+    Triggers when state changes from RUNNING/PAUSE to FINISH/FAILED.
+    """
+    global completed_jobs
+    
+    if not new_state:
+        return
+    
+    new_state = new_state.upper()
+    old_state = (old_state or '').upper()
+    
+    # Detect completion: was printing/paused, now finished/failed
+    was_active = old_state in ('RUNNING', 'PAUSE', 'ACTIVE', 'PRINTING')
+    is_done = new_state in ('FINISH', 'FINISHED', 'FAILED', 'SUCCESS')
+    
+    if was_active and is_done:
+        # Get device name from session or use ID
+        device_name = device_id
+        if device_id in mqtt_sessions:
+            session_data = mqtt_sessions[device_id].get('data', {})
+            # Try to get name from cached device info
+        
+        # Create completed job record
+        job = {
+            'id': f"{device_id}_{int(time.time())}",
+            'device_id': device_id,
+            'device_name': device_name,
+            'completed_at': time.time(),
+            'status': 'success' if new_state in ('FINISH', 'FINISHED', 'SUCCESS') else 'failed',
+            'file_name': print_data.get('subtask_name') or print_data.get('gcode_file') or 'Unknown',
+            'progress': print_data.get('mc_percent', 100),
+            'total_layers': print_data.get('total_layer_num', 0),
+            'print_time': print_data.get('print_time', 0),
+            'dismissed': False,
+            'logged': False,
+        }
+        
+        # Add to completed jobs list
+        completed_jobs.insert(0, job)
+        
+        # Trim list if too long
+        if len(completed_jobs) > MAX_COMPLETED_JOBS:
+            completed_jobs = completed_jobs[:MAX_COMPLETED_JOBS]
+        
+        logger.info(f"Job completed: {job['file_name']} on {device_id} ({new_state})")
+
+
 def mqtt_message_handler(device_id):
     """Factory function to create message handler for specific device."""
     def handler(dev_id, data):
+        global job_states
+        
         if device_id in mqtt_sessions:
             # IMPORTANT: Merge new data with existing data, don't overwrite!
             # MQTT messages are partial updates - they don't contain all fields every time
@@ -100,6 +156,16 @@ def mqtt_message_handler(device_id):
             if 'print' in data:
                 if 'print' not in existing_data:
                     existing_data['print'] = {}
+                
+                # Check for state transition BEFORE merging
+                old_state = job_states.get(device_id)
+                new_state = data['print'].get('gcode_state')
+                
+                if new_state and new_state != old_state:
+                    # State changed - check for job completion
+                    detect_job_completion(device_id, old_state, new_state, data['print'])
+                    job_states[device_id] = new_state
+                
                 # Merge new print fields into existing
                 for key, value in data['print'].items():
                     if value is not None:  # Only update if value is not None
@@ -220,18 +286,21 @@ def start_mqtt_session(device_id: str) -> dict:
 @app.route('/', methods=['GET'])
 def index():
     """API info endpoint."""
+    pending_jobs = len([j for j in completed_jobs if not j.get('dismissed')])
     return jsonify({
         'name': 'SCUBE Bambu Lab MQTT Proxy',
-        'version': '1.0.0',
+        'version': '1.1.0',
         'status': 'running',
         'configured': bool(BAMBU_TOKEN),
         'active_sessions': len(mqtt_sessions),
+        'pending_completed_jobs': pending_jobs,
         'endpoints': {
             'health': '/health',
             'devices': '/api/devices',
             'realtime_start': '/api/realtime/start',
             'realtime_data': '/api/realtime/<device_id>',
-            'all_status': '/api/status/all'
+            'all_status': '/api/status/all',
+            'completed_jobs': '/api/completed-jobs'
         }
     })
 
@@ -523,6 +592,85 @@ def get_sessions():
         'session_duration': MQTT_SESSION_DURATION,
         'sessions': sessions
     })
+
+
+@app.route('/api/completed-jobs', methods=['GET'])
+@limiter.limit("60 per minute")
+def get_completed_jobs():
+    """
+    Get list of completed print jobs.
+    Returns jobs that haven't been dismissed.
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    # Filter out dismissed jobs unless ?all=true
+    include_all = request.args.get('all') == 'true'
+    
+    if include_all:
+        jobs = completed_jobs
+    else:
+        jobs = [j for j in completed_jobs if not j.get('dismissed')]
+    
+    # Enrich with device names if we have session data
+    enriched_jobs = []
+    for job in jobs:
+        enriched = job.copy()
+        device_id = job.get('device_id')
+        if device_id in mqtt_sessions:
+            # Try to get device name from session data if available
+            pass  # Name is set when job is created
+        enriched_jobs.append(enriched)
+    
+    return jsonify({
+        'success': True,
+        'jobs': enriched_jobs,
+        'count': len(enriched_jobs),
+        'total_tracked': len(completed_jobs),
+        'timestamp': time.time()
+    })
+
+
+@app.route('/api/completed-jobs/<job_id>/dismiss', methods=['POST'])
+@limiter.limit("30 per minute")
+def dismiss_completed_job(job_id):
+    """Mark a completed job as dismissed."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    for job in completed_jobs:
+        if job['id'] == job_id:
+            job['dismissed'] = True
+            job['dismissed_at'] = time.time()
+            return jsonify({
+                'success': True,
+                'message': f"Job {job_id} dismissed",
+                'job': job
+            })
+    
+    return jsonify({'error': 'Job not found'}), 404
+
+
+@app.route('/api/completed-jobs/<job_id>/logged', methods=['POST'])
+@limiter.limit("30 per minute")
+def mark_job_logged(job_id):
+    """Mark a completed job as logged (after user logs it in WordPress)."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    for job in completed_jobs:
+        if job['id'] == job_id:
+            job['logged'] = True
+            job['logged_at'] = time.time()
+            job['dismissed'] = True  # Also dismiss after logging
+            job['dismissed_at'] = time.time()
+            return jsonify({
+                'success': True,
+                'message': f"Job {job_id} marked as logged",
+                'job': job
+            })
+    
+    return jsonify({'error': 'Job not found'}), 404
 
 
 # ============================================================================

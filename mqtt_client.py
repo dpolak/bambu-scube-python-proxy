@@ -124,12 +124,13 @@ class MQTTClient:
     def publish(self, command: Dict):
         """Publish command to device."""
         if not self.connected:
+            logger.error(f"Cannot publish - not connected to broker (connected={self.connected})")
             raise MQTTError("Not connected to broker")
         
         topic = f"device/{self.device_id}/request"
         payload = json.dumps(command)
-        self.client.publish(topic, payload)
-        logger.info(f"Published command to {topic}")
+        result = self.client.publish(topic, payload)
+        logger.info(f"Published command to {topic} - result: rc={result.rc}, mid={result.mid}")
     
     def request_full_status(self):
         """Request complete printer status via pushall command."""

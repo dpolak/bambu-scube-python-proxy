@@ -312,11 +312,18 @@ class MQTTClient:
         logger.info(f"start_print_3mf called with filename: {original_filename}")
         
         # Determine file location based on filename pattern:
-        # - gcode_file like "model.gcode.3mf" (no path) = LAN print, file in ROOT
-        # - gcode_file like "data/Metadata/..." = Cloud print, use subtask_name in CACHE
-        # - filename already has path like "cache/..." = use as-is
+        # - If already has path (cache/, /), use as-is
+        # - If it's a gcode path like "data/Metadata/..." or just a name without .3mf -> cloud print, use CACHE
+        # - If it's a filename with .gcode.3mf extension -> LAN print, file in ROOT
         
-        # Ensure filename has .3mf extension (MQTT subtask_name often lacks extension)
+        is_cloud_print = False
+        if filename.startswith('data/') or filename.startswith('Metadata/'):
+            # This is the internal gcode path, not the 3mf file - ignore it
+            # We should be using subtask_name for cloud prints, not gcode_file
+            is_cloud_print = True
+            logger.warning(f"Received internal gcode path instead of 3mf file: {filename}")
+        
+        # Ensure filename has .3mf extension
         if not filename.lower().endswith('.3mf'):
             filename = f"{filename}.gcode.3mf"
             logger.info(f"Added .gcode.3mf extension: {filename}")
@@ -328,16 +335,18 @@ class MQTTClient:
             plate_location = plate_number
         
         # Build the URL - for most printers (X1, P1, A1) use file:///sdcard/
-        # Key insight from ha-bambulab:
-        # - LAN prints: file is in ROOT (e.g., /model.gcode.3mf)
-        # - Cloud prints: file is in CACHE (e.g., /cache/model.3mf)
-        # If filename already has path prefix (cache/, /), use it. Otherwise use ROOT.
+        # Files are in CACHE for cloud prints, ROOT for LAN prints
         if filename.startswith('cache/'):
+            # Already has cache prefix
             file_url = f"file:///sdcard/{filename}"
         elif filename.startswith('/'):
             file_url = f"file:///sdcard{filename}"
+        elif is_cloud_print or '/' not in original_filename:
+            # Cloud print or simple filename without path - assume CACHE folder
+            # This is the most common case for reprints
+            file_url = f"file:///sdcard/cache/{filename}"
         else:
-            # No path prefix - file is in ROOT (typical for LAN prints)
+            # Has some other path, use as-is
             file_url = f"file:///sdcard/{filename}"
         
         # Extract subtask name from filename - keep full basename (matching ha-bambulab)

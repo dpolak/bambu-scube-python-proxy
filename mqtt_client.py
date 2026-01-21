@@ -290,7 +290,7 @@ class MQTTClient:
         This is used for reprinting a previously completed local print.
         
         Args:
-            filename: Name of the 3MF file (e.g., 'model.3mf')
+            filename: Name of the 3MF file (e.g., 'model.3mf' or 'cache/model.gcode.3mf')
             plate_number: Plate number to print (1-based) or full path like 'Metadata/plate_1.gcode'
             use_ams: Whether to use AMS for filament
             ams_mapping: AMS slot mapping [0] means slot 1, etc.
@@ -305,11 +305,26 @@ class MQTTClient:
         if ams_mapping is None:
             ams_mapping = [0]
         
+        # Normalize filename - the file on printer's SD card may be in 'cache/' folder
+        # but the project_file command expects the full path including 'cache/'
+        original_filename = filename
+        
+        # Log the original filename for debugging
+        logger.info(f"start_print_3mf called with filename: {original_filename}")
+        
         # Build plate location path
         if isinstance(plate_number, int):
             plate_location = f"Metadata/plate_{plate_number}.gcode"
         else:
             plate_location = plate_number
+        
+        # Build the FTP URL - this should point to the file on the printer
+        # Files are typically stored at ftp:///cache/filename.3mf
+        if not filename.startswith('cache/') and not filename.startswith('/'):
+            # If filename doesn't have a path prefix, assume it's in cache
+            ftp_url = f"ftp:///cache/{filename}"
+        else:
+            ftp_url = f"ftp:///{filename}"
         
         command = {
             "print": {
@@ -320,7 +335,7 @@ class MQTTClient:
                 "bed_type": bed_type,
                 "flow_cali": flow_calibration,
                 "vibration_cali": vibration_calibration,
-                "url": f"ftp:///{filename}",
+                "url": ftp_url,
                 "layer_inspect": False,
                 "sequence_id": "10000000",
                 "use_ams": use_ams,
@@ -329,7 +344,7 @@ class MQTTClient:
             }
         }
         self.publish(command)
-        logger.info(f"Sent start_print_3mf command for {filename} (plate {plate_number}, command: {command})")
+        logger.info(f"Sent start_print_3mf command: file={filename}, url={ftp_url}, plate={plate_location}")
     
     def get_last_data(self) -> Dict:
         """Get the most recent data received"""

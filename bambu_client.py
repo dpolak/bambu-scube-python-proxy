@@ -138,3 +138,136 @@ class BambuClient:
             data['profileId'] = profile_id
         
         return self.post('v1/iot-service/api/user/task', data=data)
+    
+    # ===== File Upload =====
+    
+    def get_upload_url(self, filename: str, size: int) -> Dict:
+        """
+        Get S3 signed URLs for uploading a file to Bambu Cloud.
+        
+        Args:
+            filename: Name of file to upload (e.g., "model.3mf")
+            size: File size in bytes
+            
+        Returns:
+            Dict with 'urls' array containing filename and size upload URLs
+        """
+        params = {'filename': filename, 'size': size}
+        return self.get('v1/iot-service/api/user/upload', params=params)
+    
+    def upload_file(self, file_path: str, filename: str = None) -> Dict:
+        """
+        Upload a file (3MF) to Bambu Cloud.
+        
+        Args:
+            file_path: Path to local file
+            filename: Override filename (default: use file basename)
+            
+        Returns:
+            Dict with upload result including status_code
+        """
+        import os
+        from pathlib import Path
+        
+        path = Path(file_path)
+        if not path.exists():
+            raise BambuAPIError(f"File not found: {file_path}")
+        
+        if filename is None:
+            filename = path.name
+        
+        file_size = os.path.getsize(file_path)
+        
+        # Step 1: Get upload URLs
+        upload_info = self.get_upload_url(filename, file_size)
+        urls_array = upload_info.get('urls', [])
+        
+        if not urls_array:
+            raise BambuAPIError("Cloud upload not available for this account")
+        
+        # Find filename URL
+        upload_url = None
+        size_url = None
+        for entry in urls_array:
+            if isinstance(entry, dict):
+                if entry.get('type') == 'filename':
+                    upload_url = entry.get('url')
+                elif entry.get('type') == 'size':
+                    size_url = entry.get('url')
+        
+        if not upload_url:
+            raise BambuAPIError("No filename upload URL received")
+        
+        # Step 2: Upload file to S3 (minimal headers for signed URL)
+        with open(file_path, 'rb') as f:
+            file_content = f.read()
+        
+        response = self.session.put(
+            upload_url,
+            data=file_content,
+            headers={},  # Empty - S3 signed URLs are strict
+            timeout=300
+        )
+        
+        if response.status_code >= 400:
+            raise BambuAPIError(f"File upload failed ({response.status_code}): {response.text[:200]}")
+        
+        # Step 3: Upload size info if URL provided
+        if size_url:
+            try:
+                self.session.put(
+                    size_url,
+                    data=str(file_size).encode(),
+                    headers={'Content-Type': 'text/plain'},
+                    timeout=30
+                )
+            except:
+                pass  # Size upload is optional
+        
+        return {
+            'success': True,
+            'filename': filename,
+            'file_size': file_size,
+            'status_code': response.status_code
+        }
+    
+    # ===== Notifications & Messages =====
+    
+    def get_notifications(self, unread_only: bool = False) -> Dict:
+        """
+        Get user notifications from Bambu Cloud.
+        
+        Args:
+            unread_only: Only return unread notifications
+        """
+        params = {}
+        if unread_only:
+            params['unread'] = 'true'
+        return self.get('v1/iot-service/api/user/notification', params=params)
+    
+    def mark_notification_read(self, notification_id: str, read: bool = True) -> Dict:
+        """Mark a notification as read or unread."""
+        data = {'notification_id': notification_id, 'read': read}
+        return self.session.request(
+            'PUT',
+            f"{self.BASE_URL}/v1/iot-service/api/user/notification",
+            headers=self._get_headers(),
+            json=data,
+            timeout=self.timeout
+        ).json()
+    
+    def get_messages(self, message_type: str = None, after: str = None, limit: int = 20) -> Dict:
+        """
+        Get user messages.
+        
+        Args:
+            message_type: Filter by message type
+            after: Pagination cursor (message ID)
+            limit: Max messages to return
+        """
+        params = {'limit': limit}
+        if message_type:
+            params['type'] = message_type
+        if after:
+            params['after'] = after
+        return self.get('v1/user-service/my/messages', params=params)

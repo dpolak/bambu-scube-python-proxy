@@ -497,7 +497,7 @@ def index():
     total_errors = sum(len(errs) for errs in printer_errors.values())
     return jsonify({
         'name': 'SCUBE Bambu Lab MQTT Proxy',
-        'version': '1.5.0',
+        'version': '1.6.0',
         'status': 'running',
         'configured': bool(BAMBU_TOKEN),
         'active_sessions': len(mqtt_sessions),
@@ -528,6 +528,11 @@ def index():
             'tasks': '/api/tasks',
             'quick_print': '/api/tasks/quick-print',
             'cloud_files': '/api/files',
+            'upload': '/api/upload',
+            'upload_url': '/api/upload/url',
+            'notifications': '/api/notifications',
+            'notification_read': '/api/notifications/<id>/read',
+            'messages': '/api/messages',
         }
     })
 
@@ -1601,6 +1606,236 @@ def get_cloud_files():
         
     except BambuAPIError as e:
         logger.error(f"Failed to get cloud files: {e}")
+        return jsonify({'error': str(e)}), 502
+
+
+# ============================================================================
+# FILE UPLOAD & NOTIFICATIONS
+# ============================================================================
+
+@app.route('/api/upload', methods=['POST'])
+@limiter.limit("10 per minute")
+def upload_file():
+    """
+    Upload a 3MF file to Bambu Cloud.
+    
+    Request: multipart/form-data with 'file' field
+    
+    Returns:
+        JSON with upload result including file URL
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    # Validate file extension
+    allowed_extensions = {'.3mf', '.gcode', '.gcode.3mf'}
+    filename = file.filename.lower()
+    if not any(filename.endswith(ext) for ext in allowed_extensions):
+        return jsonify({'error': f'Invalid file type. Allowed: {", ".join(allowed_extensions)}'}), 400
+    
+    try:
+        # Save file temporarily
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+            file.save(tmp.name)
+            tmp_path = tmp.name
+        
+        try:
+            client = BambuClient(BAMBU_TOKEN)
+            result = client.upload_file(tmp_path, file.filename)
+            
+            logger.info(f"File uploaded: {file.filename}")
+            
+            return jsonify({
+                'success': True,
+                'message': f'File {file.filename} uploaded successfully',
+                'result': result,
+                'timestamp': time.time()
+            })
+        finally:
+            # Clean up temp file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to upload file: {e}")
+        return jsonify({'error': str(e)}), 502
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload/url', methods=['POST'])
+@limiter.limit("30 per minute")
+def get_upload_url():
+    """
+    Get S3 signed URLs for uploading a file.
+    
+    Request JSON:
+        filename: str - Name of the file
+        size: int - Size of the file in bytes
+    
+    Returns:
+        JSON with S3 signed URLs
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    data = request.get_json() or {}
+    filename = data.get('filename')
+    size = data.get('size')
+    
+    if not filename:
+        return jsonify({'error': 'filename is required'}), 400
+    if not size:
+        return jsonify({'error': 'size is required'}), 400
+    
+    try:
+        client = BambuClient(BAMBU_TOKEN)
+        result = client.get_upload_url(filename, size)
+        
+        return jsonify({
+            'success': True,
+            'urls': result,
+            'timestamp': time.time()
+        })
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to get upload URL: {e}")
+        return jsonify({'error': str(e)}), 502
+
+
+@app.route('/api/notifications', methods=['GET'])
+@limiter.limit("30 per minute")
+def get_notifications():
+    """
+    Get user notifications from Bambu Cloud.
+    
+    Query params:
+        unread_only: bool - Only return unread notifications (default: false)
+    
+    Returns:
+        JSON with notifications list
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    unread_only = request.args.get('unread_only', 'false').lower() == 'true'
+    
+    try:
+        client = BambuClient(BAMBU_TOKEN)
+        result = client.get_notifications(unread_only=unread_only)
+        
+        notifications = result.get('notifications', []) if isinstance(result, dict) else []
+        
+        return jsonify({
+            'success': True,
+            'notifications': notifications,
+            'count': len(notifications),
+            'unread_only': unread_only,
+            'timestamp': time.time()
+        })
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to get notifications: {e}")
+        return jsonify({'error': str(e)}), 502
+
+
+@app.route('/api/notifications/<notification_id>/read', methods=['POST'])
+@limiter.limit("60 per minute")
+def mark_notification_read(notification_id):
+    """
+    Mark a notification as read or unread.
+    
+    Request JSON:
+        read: bool - True to mark as read, False to mark as unread (default: true)
+    
+    Returns:
+        JSON with success status
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    data = request.get_json() or {}
+    read = data.get('read', True)
+    
+    try:
+        client = BambuClient(BAMBU_TOKEN)
+        result = client.mark_notification_read(notification_id, read=read)
+        
+        return jsonify({
+            'success': True,
+            'notification_id': notification_id,
+            'read': read,
+            'result': result,
+            'timestamp': time.time()
+        })
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to mark notification: {e}")
+        return jsonify({'error': str(e)}), 502
+
+
+@app.route('/api/messages', methods=['GET'])
+@limiter.limit("30 per minute")
+def get_messages():
+    """
+    Get user messages from Bambu Cloud.
+    
+    Query params:
+        type: str - Message type filter (optional)
+        after: str - Cursor for pagination (optional)
+        limit: int - Number of messages to return (default: 20, max: 100)
+    
+    Returns:
+        JSON with messages list
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    message_type = request.args.get('type')
+    after = request.args.get('after')
+    limit = min(int(request.args.get('limit', 20)), 100)
+    
+    try:
+        client = BambuClient(BAMBU_TOKEN)
+        result = client.get_messages(message_type=message_type, after=after, limit=limit)
+        
+        messages = result.get('messages', []) if isinstance(result, dict) else []
+        
+        return jsonify({
+            'success': True,
+            'messages': messages,
+            'count': len(messages),
+            'limit': limit,
+            'after': after,
+            'timestamp': time.time()
+        })
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to get messages: {e}")
         return jsonify({'error': str(e)}), 502
 
 

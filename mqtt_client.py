@@ -274,6 +274,35 @@ class MQTTClient:
         self.publish(command)
         logger.info(f"Sent G-code: {gcode_line}")
     
+    def print_gcode_file(self, filepath: str):
+        """
+        Print a gcode file from the printer's storage using gcode_file command.
+        
+        This is a simpler alternative to project_file that may work without
+        cryptographic signing on some firmware versions.
+        
+        Args:
+            filepath: Full path to the gcode file on the printer
+                     (e.g., '/sdcard/x-gcode/file.gcode.3mf' or 
+                      '/sdcard/cache/file.gcode.3mf')
+        
+        Returns:
+            None (command is published async)
+        """
+        # Normalize the path
+        if not filepath.startswith('/'):
+            filepath = f'/sdcard/{filepath}'
+        
+        command = {
+            "print": {
+                "command": "gcode_file",
+                "param": filepath,
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info(f"Sent gcode_file command: {filepath}")
+    
     def start_print_3mf(
         self,
         filename: str,

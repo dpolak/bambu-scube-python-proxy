@@ -559,6 +559,7 @@ def index():
                 'temperature': '/api/control/<device_id>/temperature',
                 'fan': '/api/control/<device_id>/fan',
                 'gcode': '/api/control/<device_id>/gcode',
+                'print_file': '/api/control/<device_id>/print-file',
             },
             'ams': '/api/ams/<device_id>',
             'camera': '/api/camera/<device_id>',
@@ -1335,6 +1336,49 @@ def send_gcode(device_id):
         })
     except Exception as e:
         logger.error(f"Failed to send G-code to {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/control/<device_id>/print-file', methods=['POST'])
+@limiter.limit("5 per minute")
+def print_file(device_id):
+    """
+    Print a gcode file from the printer's storage using gcode_file command.
+    
+    This is a simpler alternative to project_file that may work without
+    cryptographic signing on some firmware versions.
+    
+    Body parameters:
+        filepath: Path to gcode file on printer (e.g., '/sdcard/x-gcode/file.gcode.3mf')
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    data = request.get_json() or {}
+    filepath = data.get('filepath', '').strip()
+    
+    if not filepath:
+        return jsonify({'error': 'filepath parameter required'}), 400
+    
+    try:
+        session = mqtt_sessions[device_id]
+        session['client'].print_gcode_file(filepath)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Print file command sent to {device_id}',
+            'command': 'gcode_file',
+            'filepath': filepath
+        })
+    except Exception as e:
+        logger.error(f"Failed to send print-file command to {device_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
 

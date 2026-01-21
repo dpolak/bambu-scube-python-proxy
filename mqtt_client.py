@@ -141,6 +141,66 @@ class MQTTClient:
         self.publish(command)
         logger.info("Requested full printer status (pushall)")
     
+    def pause_print(self):
+        """Pause the current print job."""
+        command = {
+            "print": {
+                "command": "pause",
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info("Sent pause command")
+    
+    def resume_print(self):
+        """Resume a paused print job."""
+        command = {
+            "print": {
+                "command": "resume",
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info("Sent resume command")
+    
+    def stop_print(self):
+        """Stop/cancel the current print job."""
+        command = {
+            "print": {
+                "command": "stop",
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info("Sent stop command")
+    
+    def set_print_speed(self, level: int):
+        """Set print speed level (1=silent, 2=standard, 3=sport, 4=ludicrous)."""
+        if level < 1 or level > 4:
+            raise ValueError("Speed level must be between 1 and 4")
+        command = {
+            "print": {
+                "command": "print_speed",
+                "param": str(level),
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info(f"Set print speed to level {level}")
+    
+    def set_light(self, on: bool):
+        """Turn the chamber light on or off."""
+        command = {
+            "system": {
+                "command": "ledctrl",
+                "led_node": "chamber_light",
+                "led_mode": "on" if on else "off",
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info(f"Set chamber light {'on' if on else 'off'}")
+    
     def get_last_data(self) -> Dict:
         """Get the most recent data received"""
         return self.last_data.copy()

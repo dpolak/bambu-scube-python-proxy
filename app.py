@@ -367,6 +367,11 @@ def index():
             'completed_jobs': '/api/completed-jobs',
             'print_history': '/api/print-history',
             'errors': '/api/errors',
+            'control_pause': '/api/control/<device_id>/pause',
+            'control_resume': '/api/control/<device_id>/resume',
+            'control_stop': '/api/control/<device_id>/stop',
+            'control_speed': '/api/control/<device_id>/speed',
+            'control_light': '/api/control/<device_id>/light',
         }
     })
 
@@ -464,6 +469,11 @@ def get_realtime(device_id):
     data = session['data']
     print_data = data.get('print', {})
     
+    # Get any active HMS errors for this device
+    device_errors = printer_errors.get(device_id, [])
+    # Get recent errors (last 5 minutes)
+    recent_errors = [e for e in device_errors if now - e['timestamp'] < 300]
+    
     return jsonify({
         'success': True,
         'device_id': device_id,
@@ -492,7 +502,13 @@ def get_realtime(device_id):
             'heatbreak_fan': print_data.get('heatbreak_fan_speed'),
             # Wifi
             'wifi_signal': print_data.get('wifi_signal'),
+            # Speed
+            'spd_lvl': print_data.get('spd_lvl'),
+            'spd_mag': print_data.get('spd_mag'),
+            # HMS errors (if any active)
+            'hms': print_data.get('hms', []),
         },
+        'errors': recent_errors,
         'raw': data  # Include full raw data for debugging
     })
 
@@ -834,6 +850,161 @@ def clear_device_errors(device_id):
         })
     
     return jsonify({'success': True, 'message': 'No errors to clear'})
+
+
+# ============================================================================
+# PRINTER CONTROL ENDPOINTS
+# ============================================================================
+
+@app.route('/api/control/<device_id>/pause', methods=['POST'])
+@limiter.limit("10 per minute")
+def pause_print(device_id):
+    """Pause the current print on a device."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    try:
+        session = mqtt_sessions[device_id]
+        session['client'].pause_print()
+        return jsonify({
+            'success': True,
+            'message': f'Pause command sent to {device_id}',
+            'command': 'pause'
+        })
+    except Exception as e:
+        logger.error(f"Failed to pause print on {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/control/<device_id>/resume', methods=['POST'])
+@limiter.limit("10 per minute")
+def resume_print(device_id):
+    """Resume a paused print on a device."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    try:
+        session = mqtt_sessions[device_id]
+        session['client'].resume_print()
+        return jsonify({
+            'success': True,
+            'message': f'Resume command sent to {device_id}',
+            'command': 'resume'
+        })
+    except Exception as e:
+        logger.error(f"Failed to resume print on {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/control/<device_id>/stop', methods=['POST'])
+@limiter.limit("10 per minute")
+def stop_print(device_id):
+    """Stop/cancel the current print on a device."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    try:
+        session = mqtt_sessions[device_id]
+        session['client'].stop_print()
+        return jsonify({
+            'success': True,
+            'message': f'Stop command sent to {device_id}',
+            'command': 'stop'
+        })
+    except Exception as e:
+        logger.error(f"Failed to stop print on {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/control/<device_id>/speed', methods=['POST'])
+@limiter.limit("30 per minute")
+def set_speed(device_id):
+    """Set print speed level (1=silent, 2=standard, 3=sport, 4=ludicrous)."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    data = request.get_json() or {}
+    level = data.get('level')
+    
+    if not level or level not in [1, 2, 3, 4]:
+        return jsonify({
+            'error': 'Invalid speed level',
+            'message': 'Level must be 1 (silent), 2 (standard), 3 (sport), or 4 (ludicrous)'
+        }), 400
+    
+    try:
+        session = mqtt_sessions[device_id]
+        session['client'].set_print_speed(level)
+        speed_names = {1: 'silent', 2: 'standard', 3: 'sport', 4: 'ludicrous'}
+        return jsonify({
+            'success': True,
+            'message': f'Speed set to {speed_names[level]} on {device_id}',
+            'command': 'speed',
+            'level': level,
+            'level_name': speed_names[level]
+        })
+    except Exception as e:
+        logger.error(f"Failed to set speed on {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/control/<device_id>/light', methods=['POST'])
+@limiter.limit("30 per minute")
+def set_light(device_id):
+    """Turn the chamber light on or off."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    data = request.get_json() or {}
+    on = data.get('on', True)
+    
+    try:
+        session = mqtt_sessions[device_id]
+        session['client'].set_light(on)
+        return jsonify({
+            'success': True,
+            'message': f'Light turned {"on" if on else "off"} on {device_id}',
+            'command': 'light',
+            'state': 'on' if on else 'off'
+        })
+    except Exception as e:
+        logger.error(f"Failed to set light on {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 # ============================================================================

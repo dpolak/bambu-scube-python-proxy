@@ -72,6 +72,95 @@ HISTORY_FILE = '/tmp/scube_print_history.json'
 # Error tracking
 printer_errors = {}  # device_id -> list of recent errors
 
+# Active job tracking - cache file names while printing
+active_jobs = {}  # device_id -> {'file_name': str, 'start_time': float, ...}
+
+# HMS Error Code Translation (BambuLab Health Management System)
+# Format: 0xAABBCCDD where AA=module, BB=category, CC=error, DD=severity
+HMS_ERROR_CODES = {
+    # Print errors (0x07xx)
+    0x0700_0100: "Heatbed temperature too high",
+    0x0700_0200: "Heatbed PTC heater temperature anomaly",
+    0x0700_0300: "Heatbed preheat abnormal",
+    0x0700_0400: "Nozzle heating error",
+    0x0700_0500: "Nozzle temperature abnormal",
+    0x0700_0600: "Filament cutter failure",
+    0x0700_0700: "Chamber heater error",
+    0x0700_1000: "Motor A lost steps",
+    0x0700_1100: "Motor B lost steps", 
+    0x0700_1200: "Motor C lost steps",
+    0x0700_2000: "AMS communication error",
+    0x0700_2100: "AMS slot empty",
+    0x0700_2200: "AMS filament runout",
+    0x0700_2300: "AMS slot disconnected",
+    0x0700_3000: "Filament tangled",
+    0x0700_3100: "Filament broken",
+    0x0700_3200: "Filament runout",
+    0x0700_3300: "Filament clogged",
+    0x0700_4000: "First layer inspection failed",
+    0x0700_4100: "Spaghetti detected",
+    0x0700_4200: "Purging excess filament",
+    0x0700_5000: "Nozzle clogged",
+    0x0700_5100: "Hotend not installed",
+    # X1 specific (0x05xx)
+    0x0500_0100: "X-axis motor stalled",
+    0x0500_0200: "Y-axis motor stalled",
+    0x0500_0300: "Z-axis motor stalled",
+    0x0500_0400: "Extruder motor stalled",
+    # AMS errors (0x03xx)
+    0x0300_0100: "AMS1 slot 1 empty",
+    0x0300_0200: "AMS1 slot 2 empty",
+    0x0300_0300: "AMS1 slot 3 empty",
+    0x0300_0400: "AMS1 slot 4 empty",
+    0x0300_1000: "AMS assist motor error",
+    0x0300_1100: "AMS hub communication error",
+    0x0300_1200: "AMS filament not detected",
+    0x0300_2000: "AMS RFID reading error",
+    0x0300_3000: "AMS filament runout",
+    0x0300_4000: "AMS slot mismatch",
+    # Warnings (0x12xx)
+    0x1200_0100: "Front cover open",
+    0x1200_0200: "Top cover open", 
+    0x1200_0300: "Enclosure door open",
+    0x1200_1000: "Carbon filter needs replacement",
+    0x1200_1100: "HEPA filter needs replacement",
+    0x1200_2000: "Toolhead offline",
+}
+
+HMS_SEVERITY = {
+    1: 'fatal',
+    2: 'serious', 
+    3: 'common',
+    4: 'info',
+}
+
+
+def translate_hms_code(attr_code, level_code=None):
+    """Translate HMS error code to human-readable message."""
+    # Try exact match
+    if attr_code in HMS_ERROR_CODES:
+        return HMS_ERROR_CODES[attr_code]
+    
+    # Try to extract module info from code
+    if attr_code:
+        module = (attr_code >> 24) & 0xFF
+        category = (attr_code >> 16) & 0xFF
+        modules = {
+            0x01: "Main Controller",
+            0x02: "X-Cam",
+            0x03: "AMS",
+            0x04: "Toolhead",
+            0x05: "Motion",
+            0x06: "Media",
+            0x07: "Print",
+            0x0C: "External Device",
+            0x12: "System Warning",
+        }
+        module_name = modules.get(module, f"Module {module:02X}")
+        return f"{module_name} error (0x{attr_code:08X})"
+    
+    return f"Unknown error"
+
 
 def load_print_history():
     """Load print history from file."""
@@ -130,7 +219,7 @@ def detect_job_completion(device_id, old_state, new_state, print_data):
     Detect when a print job completes and store it.
     Triggers when state changes from RUNNING/PAUSE to FINISH/FAILED.
     """
-    global completed_jobs
+    global completed_jobs, active_jobs
     
     if not new_state:
         return
@@ -149,6 +238,20 @@ def detect_job_completion(device_id, old_state, new_state, print_data):
             session_data = mqtt_sessions[device_id].get('data', {})
             # Try to get name from cached device info
         
+        # Get file name: prefer cached active job name, fallback to print_data
+        file_name = 'Unknown'
+        if device_id in active_jobs and active_jobs[device_id].get('file_name'):
+            file_name = active_jobs[device_id]['file_name']
+        else:
+            file_name = print_data.get('subtask_name') or print_data.get('gcode_file') or 'Unknown'
+        
+        # Calculate print duration if we have start time
+        print_duration = 0
+        if device_id in active_jobs and 'start_time' in active_jobs[device_id]:
+            print_duration = int(time.time() - active_jobs[device_id]['start_time'])
+        else:
+            print_duration = print_data.get('print_time', 0) * 60  # Convert minutes to seconds
+        
         # Create completed job record
         job = {
             'id': f"{device_id}_{int(time.time())}",
@@ -156,10 +259,11 @@ def detect_job_completion(device_id, old_state, new_state, print_data):
             'device_name': device_name,
             'completed_at': time.time(),
             'status': 'success' if new_state in ('FINISH', 'FINISHED', 'SUCCESS') else 'failed',
-            'file_name': print_data.get('subtask_name') or print_data.get('gcode_file') or 'Unknown',
+            'file_name': file_name,
             'progress': print_data.get('mc_percent', 100),
             'total_layers': print_data.get('total_layer_num', 0),
-            'print_time': print_data.get('print_time', 0),  # Minutes actually printed
+            'print_time': print_data.get('print_time', 0),  # Minutes from printer
+            'print_duration': print_duration,  # Actual seconds from our tracking
             'dismissed': False,
             'logged': False,
             # Additional tracking data
@@ -183,13 +287,17 @@ def detect_job_completion(device_id, old_state, new_state, print_data):
         print_history.insert(0, history_entry)
         save_print_history()
         
+        # Clear active job cache for this device
+        if device_id in active_jobs:
+            del active_jobs[device_id]
+        
         logger.info(f"Job completed: {job['file_name']} on {device_id} ({new_state})")
 
 
 def mqtt_message_handler(device_id):
     """Factory function to create message handler for specific device."""
     def handler(dev_id, data):
-        global job_states
+        global job_states, active_jobs
         
         if device_id in mqtt_sessions:
             # IMPORTANT: Merge new data with existing data, don't overwrite!
@@ -200,6 +308,23 @@ def mqtt_message_handler(device_id):
             if 'print' in data:
                 if 'print' not in existing_data:
                     existing_data['print'] = {}
+                
+                # Cache file name when we see it (for job completion tracking)
+                file_name = data['print'].get('subtask_name') or data['print'].get('gcode_file')
+                gcode_state = data['print'].get('gcode_state', '').upper()
+                
+                if file_name and file_name != '' and file_name.lower() != 'unknown':
+                    # Track active job file name
+                    if device_id not in active_jobs:
+                        active_jobs[device_id] = {}
+                    active_jobs[device_id]['file_name'] = file_name
+                    active_jobs[device_id]['last_seen'] = time.time()
+                    
+                    # Also store start time if this looks like a new print
+                    if gcode_state in ('RUNNING', 'PREPARE', 'PRINTING'):
+                        if 'start_time' not in active_jobs[device_id]:
+                            active_jobs[device_id]['start_time'] = time.time()
+                            logger.info(f"Active job started on {device_id}: {file_name}")
                 
                 # Check for state transition BEFORE merging
                 old_state = job_states.get(device_id)
@@ -220,12 +345,14 @@ def mqtt_message_handler(device_id):
                             'timestamp': time.time(),
                             'code': hms.get('attr'),
                             'level': hms.get('code'),  # 1=fatal, 2=serious, 3=common, 4=info
+                            'message': translate_hms_code(hms.get('attr'), hms.get('code')),
+                            'severity': HMS_SEVERITY.get(hms.get('code'), 'unknown'),
                             'raw': hms,
                         }
                         printer_errors[device_id].insert(0, error_entry)
                         # Keep only last 20 errors per device
                         printer_errors[device_id] = printer_errors[device_id][:20]
-                        logger.warning(f"Printer error on {device_id}: {hms}")
+                        logger.warning(f"Printer error on {device_id}: {error_entry['message']} (code: {hms.get('attr')})")
                 
                 # Merge new print fields into existing
                 for key, value in data['print'].items():

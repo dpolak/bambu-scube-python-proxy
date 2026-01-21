@@ -796,6 +796,12 @@ def get_all_status():
                         'gcode_file': print_data.get('gcode_file'),  # For local reprint
                         'print_stage': print_data.get('mc_print_stage'),
                         
+                        # Cloud reprint IDs (from active_jobs cache or print_data)
+                        'task_id': active_jobs.get(device_id, {}).get('task_id') or print_data.get('task_id'),
+                        'project_id': active_jobs.get(device_id, {}).get('project_id') or print_data.get('project_id'),
+                        'subtask_id': active_jobs.get(device_id, {}).get('subtask_id') or print_data.get('subtask_id'),
+                        'profile_id': active_jobs.get(device_id, {}).get('profile_id') or print_data.get('profile_id'),
+                        
                         # Fans (0-15 scale, convert to percentage)
                         'cooling_fan': int(print_data.get('cooling_fan_speed', '0') or '0') * 100 // 15 if print_data.get('cooling_fan_speed') else None,
                         'heatbreak_fan': int(print_data.get('heatbreak_fan_speed', '0') or '0') * 100 // 15 if print_data.get('heatbreak_fan_speed') else None,

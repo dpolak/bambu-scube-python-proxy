@@ -330,21 +330,27 @@ class MQTTClient:
             "print": {
                 "command": "project_file",
                 "param": plate_location,
+                "project_id": "0",       # Required for local prints
+                "profile_id": "0",       # Required for local prints
+                "task_id": "0",          # Required for local prints
+                "subtask_id": "0",       # Required for local prints
+                "subtask_name": "",      # Optional for local prints
                 "file": filename,
+                "url": ftp_url,
+                "md5": "",               # Empty for local prints
+                "timelapse": True,       # Enable timelapse
+                "bed_type": "auto",      # Use "auto" for local prints
                 "bed_leveling": bed_leveling,
-                "bed_type": bed_type,
                 "flow_cali": flow_calibration,
                 "vibration_cali": vibration_calibration,
-                "url": ftp_url,
                 "layer_inspect": False,
-                "sequence_id": "10000000",
                 "use_ams": use_ams,
-                "ams_mapping": list(ams_mapping),
-                "skip_objects": None
+                "ams_mapping": list(ams_mapping) if ams_mapping else [],
+                "sequence_id": "0"
             }
         }
         self.publish(command)
-        logger.info(f"Sent start_print_3mf command: file={filename}, url={ftp_url}, plate={plate_location}")
+        logger.info(f"Sent start_print_3mf command: file={filename}, url={ftp_url}, plate={plate_location}, full_command={command}")
     
     def get_last_data(self) -> Dict:
         """Get the most recent data received"""

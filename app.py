@@ -291,6 +291,9 @@ def detect_job_completion(device_id, old_state, new_state, print_data, is_initia
             'subtask_id': active_jobs.get(device_id, {}).get('subtask_id') or print_data.get('subtask_id'),
             'profile_id': active_jobs.get(device_id, {}).get('profile_id') or print_data.get('profile_id'),
             # MQTT reprint info (for local/SD card prints)
+            # subtask_name is the actual 3mf file (e.g., 'cache/model.gcode.3mf')
+            # gcode_file is the internal path (e.g., 'Metadata/plate_1.gcode')
+            'subtask_name': active_jobs.get(device_id, {}).get('subtask_name') or print_data.get('subtask_name'),
             'gcode_file': active_jobs.get(device_id, {}).get('gcode_file') or print_data.get('gcode_file'),
         }
         
@@ -348,11 +351,14 @@ def mqtt_message_handler(device_id):
                             active_jobs[device_id]['start_time'] = time.time()
                             logger.info(f"Active job started on {device_id}: {file_name}")
                 
-                # Store gcode_file path for MQTT-based reprinting
+                # Store subtask_name (3mf file) and gcode_file for MQTT-based reprinting
+                subtask_name = data['print'].get('subtask_name')
                 gcode_file = data['print'].get('gcode_file')
+                if device_id not in active_jobs:
+                    active_jobs[device_id] = {}
+                if subtask_name and subtask_name.lower() not in ('', 'unknown', 'none'):
+                    active_jobs[device_id]['subtask_name'] = subtask_name
                 if gcode_file and gcode_file.lower() not in ('', 'unknown', 'none'):
-                    if device_id not in active_jobs:
-                        active_jobs[device_id] = {}
                     active_jobs[device_id]['gcode_file'] = gcode_file
                 
                 # Cache project/task IDs for reprint functionality
@@ -1516,9 +1522,10 @@ def get_tasks():
                 'subtask_id': job.get('subtask_id'),
                 'profile_id': job.get('profile_id'),
                 'has_reprint_ids': bool(job.get('task_id') or job.get('project_id')),
-                # Local reprint info (MQTT)
+                # Local reprint info (MQTT) - subtask_name is the 3mf file
+                'subtask_name': job.get('subtask_name'),
                 'gcode_file': job.get('gcode_file'),
-                'has_local_reprint': bool(job.get('gcode_file')),
+                'has_local_reprint': bool(job.get('subtask_name') or job.get('gcode_file')),
             })
         
         return jsonify({
@@ -1645,13 +1652,14 @@ def local_reprint():
     
     data = request.get_json() or {}
     device_id = data.get('device_id')
-    gcode_file = data.get('gcode_file')
+    # Accept subtask_name (actual 3mf file) or gcode_file for backward compatibility
+    filename = data.get('subtask_name') or data.get('gcode_file')
     
     if not device_id:
         return jsonify({'error': 'device_id is required'}), 400
     
-    if not gcode_file:
-        return jsonify({'error': 'gcode_file is required for local reprint'}), 400
+    if not filename:
+        return jsonify({'error': 'subtask_name or gcode_file is required for local reprint'}), 400
     
     # Check if we have an active MQTT session for this device
     if device_id not in mqtt_sessions:
@@ -1678,7 +1686,7 @@ def local_reprint():
         
         # Send the print command via MQTT
         mqtt_client.start_print_3mf(
-            filename=gcode_file,
+            filename=filename,
             plate_number=plate_number,
             use_ams=use_ams,
             ams_mapping=ams_mapping,
@@ -1688,13 +1696,13 @@ def local_reprint():
             bed_type=bed_type
         )
         
-        logger.info(f"Local reprint triggered: file={gcode_file}, device={device_id}")
+        logger.info(f"Local reprint triggered: file={filename}, device={device_id}")
         
         return jsonify({
             'success': True,
-            'message': f'Reprint command sent for {gcode_file}',
+            'message': f'Reprint command sent for {filename}',
             'device_id': device_id,
-            'gcode_file': gcode_file,
+            'filename': filename,
             'plate_number': plate_number,
             'use_ams': use_ams
         })

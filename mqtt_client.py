@@ -321,14 +321,14 @@ class MQTTClient:
                 "vibration_cali": vibration_calibration,
                 "url": f"ftp:///{filename}",
                 "layer_inspect": False,
-                "sequence_id": "0",
+                "sequence_id": "10000000",
                 "use_ams": use_ams,
                 "ams_mapping": list(ams_mapping),
                 "skip_objects": None
             }
         }
         self.publish(command)
-        logger.info(f"Sent start_print_3mf command for {filename} (plate {plate_number})")
+        logger.info(f"Sent start_print_3mf command for {filename} (plate {plate_number}, command: {command})")
     
     def get_last_data(self) -> Dict:
         """Get the most recent data received"""

@@ -497,7 +497,7 @@ def index():
     total_errors = sum(len(errs) for errs in printer_errors.values())
     return jsonify({
         'name': 'SCUBE Bambu Lab MQTT Proxy',
-        'version': '1.4.0',
+        'version': '1.5.0',
         'status': 'running',
         'configured': bool(BAMBU_TOKEN),
         'active_sessions': len(mqtt_sessions),
@@ -513,11 +513,18 @@ def index():
             'completed_jobs': '/api/completed-jobs',
             'print_history': '/api/print-history',
             'errors': '/api/errors',
-            'control_pause': '/api/control/<device_id>/pause',
-            'control_resume': '/api/control/<device_id>/resume',
-            'control_stop': '/api/control/<device_id>/stop',
-            'control_speed': '/api/control/<device_id>/speed',
-            'control_light': '/api/control/<device_id>/light',
+            'control': {
+                'pause': '/api/control/<device_id>/pause',
+                'resume': '/api/control/<device_id>/resume',
+                'stop': '/api/control/<device_id>/stop',
+                'speed': '/api/control/<device_id>/speed',
+                'light': '/api/control/<device_id>/light',
+                'temperature': '/api/control/<device_id>/temperature',
+                'fan': '/api/control/<device_id>/fan',
+                'gcode': '/api/control/<device_id>/gcode',
+            },
+            'ams': '/api/ams/<device_id>',
+            'camera': '/api/camera/<device_id>',
             'tasks': '/api/tasks',
             'quick_print': '/api/tasks/quick-print',
             'cloud_files': '/api/files',
@@ -1154,6 +1161,267 @@ def set_light(device_id):
     except Exception as e:
         logger.error(f"Failed to set light on {device_id}: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/control/<device_id>/temperature', methods=['POST'])
+@limiter.limit("20 per minute")
+def set_temperature(device_id):
+    """Set nozzle or bed temperature."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    data = request.get_json() or {}
+    target = data.get('target', 'nozzle')  # 'nozzle' or 'bed'
+    temp = data.get('temp', 0)
+    
+    if not isinstance(temp, int) or temp < 0:
+        return jsonify({'error': 'Invalid temperature value'}), 400
+    
+    try:
+        session = mqtt_sessions[device_id]
+        if target == 'nozzle':
+            session['client'].set_nozzle_temp(temp)
+        elif target == 'bed':
+            session['client'].set_bed_temp(temp)
+        else:
+            return jsonify({'error': 'Invalid target. Use "nozzle" or "bed"'}), 400
+        
+        return jsonify({
+            'success': True,
+            'message': f'{target.title()} temperature set to {temp}°C on {device_id}',
+            'command': 'temperature',
+            'target': target,
+            'temp': temp
+        })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Failed to set temperature on {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/control/<device_id>/fan', methods=['POST'])
+@limiter.limit("20 per minute")
+def set_fan(device_id):
+    """Set fan speed (0-100%)."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    data = request.get_json() or {}
+    fan_type = data.get('type', 'part')  # 'part', 'aux', 'chamber'
+    speed = data.get('speed', 0)
+    
+    if not isinstance(speed, int) or speed < 0 or speed > 100:
+        return jsonify({'error': 'Speed must be 0-100'}), 400
+    
+    try:
+        session = mqtt_sessions[device_id]
+        session['client'].set_fan_speed(speed, fan_type)
+        
+        return jsonify({
+            'success': True,
+            'message': f'{fan_type.title()} fan set to {speed}% on {device_id}',
+            'command': 'fan',
+            'type': fan_type,
+            'speed': speed
+        })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Failed to set fan on {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/control/<device_id>/gcode', methods=['POST'])
+@limiter.limit("10 per minute")
+def send_gcode(device_id):
+    """Send a raw G-code command to the printer."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    data = request.get_json() or {}
+    gcode = data.get('gcode', '').strip()
+    
+    if not gcode:
+        return jsonify({'error': 'G-code command required'}), 400
+    
+    # Safety: block dangerous commands
+    dangerous = ['M112', 'M999', 'G28', 'G29']  # Emergency stop, reset, home, bed level
+    for cmd in dangerous:
+        if gcode.upper().startswith(cmd):
+            return jsonify({'error': f'Command {cmd} is blocked for safety'}), 403
+    
+    try:
+        session = mqtt_sessions[device_id]
+        session['client'].send_gcode(gcode)
+        
+        return jsonify({
+            'success': True,
+            'message': f'G-code sent to {device_id}',
+            'command': 'gcode',
+            'gcode': gcode
+        })
+    except Exception as e:
+        logger.error(f"Failed to send G-code to {device_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ams/<device_id>', methods=['GET'])
+@limiter.limit("60 per minute")
+def get_ams_info(device_id):
+    """Get AMS filament information for a device from cached MQTT data."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active session',
+            'message': 'Start monitoring first via POST /api/realtime/start',
+            'device_id': device_id
+        }), 404
+    
+    session = mqtt_sessions[device_id]
+    data = session.get('data', {})
+    
+    # Extract AMS info from cached print data
+    print_data = data.get('print', {})
+    ams_data = print_data.get('ams', {})
+    
+    # Parse AMS units and trays
+    ams_units = []
+    ams_list = ams_data.get('ams', [])
+    
+    for unit in ams_list:
+        unit_info = {
+            'id': unit.get('id'),
+            'humidity': unit.get('humidity'),
+            'temp': unit.get('temp'),
+            'trays': []
+        }
+        
+        for tray in unit.get('tray', []):
+            tray_info = {
+                'id': tray.get('id'),
+                'color': tray.get('tray_color', ''),
+                'type': tray.get('tray_type', ''),
+                'sub_brands': tray.get('tray_sub_brands', ''),
+                'weight': tray.get('tray_weight'),
+                'diameter': tray.get('tray_diameter'),
+                'temp_min': tray.get('nozzle_temp_min'),
+                'temp_max': tray.get('nozzle_temp_max'),
+                'remain': tray.get('remain', -1),
+                'k_value': tray.get('k'),
+                'tag_uid': tray.get('tag_uid'),
+            }
+            unit_info['trays'].append(tray_info)
+        
+        ams_units.append(unit_info)
+    
+    # External spool (virtual tray 254)
+    vt_tray = print_data.get('vt_tray', {})
+    external_spool = None
+    if vt_tray:
+        external_spool = {
+            'id': 254,
+            'color': vt_tray.get('tray_color', ''),
+            'type': vt_tray.get('tray_type', ''),
+            'sub_brands': vt_tray.get('tray_sub_brands', ''),
+            'temp_min': vt_tray.get('nozzle_temp_min'),
+            'temp_max': vt_tray.get('nozzle_temp_max'),
+            'k_value': vt_tray.get('k'),
+        }
+    
+    return jsonify({
+        'success': True,
+        'device_id': device_id,
+        'ams': {
+            'version': ams_data.get('version'),
+            'humidity_idx': ams_data.get('ams_humidity'),
+            'tray_now': ams_data.get('tray_now'),
+            'tray_tar': ams_data.get('tray_tar'),
+            'units': ams_units,
+            'external_spool': external_spool
+        },
+        'timestamp': time.time()
+    })
+
+
+@app.route('/api/camera/<device_id>', methods=['GET'])
+@limiter.limit("10 per minute")
+def get_camera_info(device_id):
+    """Get camera/webcam credentials for a device."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    try:
+        client = BambuClient(BAMBU_TOKEN)
+        
+        # Try to get camera credentials from cloud API
+        try:
+            response = client.get('v1/iot-service/api/user/device/camera', params={'device_id': device_id})
+            return jsonify({
+                'success': True,
+                'device_id': device_id,
+                'camera': response,
+                'timestamp': time.time()
+            })
+        except BambuAPIError:
+            # Camera endpoint might not exist, return info from MQTT instead
+            pass
+        
+        # Fallback: check if we have device info with IP/access code
+        if device_id in mqtt_sessions:
+            session = mqtt_sessions[device_id]
+            data = session.get('data', {})
+            
+            # Some MQTT messages include camera URLs
+            camera_info = {
+                'note': 'Camera access requires local network. Use printer IP and access code.',
+                'rtsp_url_template': 'rtsps://{IP}:322/streaming/live/1?user=bblp&password={ACCESS_CODE}',
+                'jpeg_url_template': 'http://{IP}:8989/live/streaming/live/1'
+            }
+            
+            return jsonify({
+                'success': True,
+                'device_id': device_id,
+                'camera': camera_info,
+                'source': 'template',
+                'timestamp': time.time()
+            })
+        
+        return jsonify({
+            'success': False,
+            'error': 'Camera info not available',
+            'device_id': device_id
+        }), 404
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to get camera info: {e}")
+        return jsonify({'error': str(e)}), 502
 
 
 # ============================================================================

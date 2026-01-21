@@ -201,6 +201,78 @@ class MQTTClient:
         self.publish(command)
         logger.info(f"Set chamber light {'on' if on else 'off'}")
     
+    def set_nozzle_temp(self, temp: int):
+        """Set nozzle temperature. Use 0 to turn off heating."""
+        if temp < 0 or temp > 300:
+            raise ValueError("Nozzle temperature must be between 0 and 300°C")
+        command = {
+            "print": {
+                "command": "gcode_line",
+                "param": f"M104 S{temp}",
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info(f"Set nozzle temperature to {temp}°C")
+    
+    def set_bed_temp(self, temp: int):
+        """Set bed temperature. Use 0 to turn off heating."""
+        if temp < 0 or temp > 120:
+            raise ValueError("Bed temperature must be between 0 and 120°C")
+        command = {
+            "print": {
+                "command": "gcode_line",
+                "param": f"M140 S{temp}",
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info(f"Set bed temperature to {temp}°C")
+    
+    def set_fan_speed(self, speed: int, fan_type: str = "part"):
+        """
+        Set fan speed (0-100%).
+        
+        fan_type: 'part' (part cooling), 'aux' (auxiliary), 'chamber'
+        """
+        if speed < 0 or speed > 100:
+            raise ValueError("Fan speed must be between 0 and 100%")
+        
+        # Convert percentage to 0-255 range
+        pwm_value = int(speed * 255 / 100)
+        
+        # Different fans use different G-code
+        if fan_type == 'part':
+            gcode = f"M106 P1 S{pwm_value}"  # Part cooling fan
+        elif fan_type == 'aux':
+            gcode = f"M106 P2 S{pwm_value}"  # Auxiliary fan
+        elif fan_type == 'chamber':
+            gcode = f"M106 P3 S{pwm_value}"  # Chamber fan (if supported)
+        else:
+            raise ValueError(f"Unknown fan type: {fan_type}")
+        
+        command = {
+            "print": {
+                "command": "gcode_line",
+                "param": gcode,
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info(f"Set {fan_type} fan speed to {speed}%")
+    
+    def send_gcode(self, gcode_line: str):
+        """Send a raw G-code command to the printer."""
+        command = {
+            "print": {
+                "command": "gcode_line",
+                "param": gcode_line,
+                "sequence_id": "0"
+            }
+        }
+        self.publish(command)
+        logger.info(f"Sent G-code: {gcode_line}")
+    
     def get_last_data(self) -> Dict:
         """Get the most recent data received"""
         return self.last_data.copy()

@@ -312,6 +312,13 @@ class MQTTClient:
         # Log the original filename for debugging
         logger.info(f"start_print_3mf called with filename: {original_filename}")
         
+        # Ensure filename has .3mf extension (MQTT subtask_name often lacks extension)
+        # Common patterns: "model" -> "model.gcode.3mf", "model.3mf" -> "model.3mf"
+        if not filename.lower().endswith('.3mf'):
+            # Add .gcode.3mf extension (standard Bambu format)
+            filename = f"{filename}.gcode.3mf"
+            logger.info(f"Added .gcode.3mf extension: {filename}")
+        
         # Build plate location path
         if isinstance(plate_number, int):
             plate_location = f"Metadata/plate_{plate_number}.gcode"

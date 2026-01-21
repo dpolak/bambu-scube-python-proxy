@@ -326,31 +326,37 @@ class MQTTClient:
         else:
             ftp_url = f"ftp:///{filename}"
         
+        # Extract subtask name from filename (without path and extension)
+        import os
+        subtask_name = os.path.splitext(os.path.basename(filename))[0]
+        # Remove .gcode suffix if present (e.g., "model.gcode.3mf" -> "model")
+        if subtask_name.endswith('.gcode'):
+            subtask_name = subtask_name[:-6]
+        
+        # Build command matching ha-bambulab's PRINT_PROJECT_FILE_TEMPLATE
         command = {
             "print": {
+                "sequence_id": 0,        # Integer, not string!
                 "command": "project_file",
                 "param": plate_location,
-                "project_id": "0",       # Required for local prints
-                "profile_id": "0",       # Required for local prints
-                "task_id": "0",          # Required for local prints
-                "subtask_id": "0",       # Required for local prints
-                "subtask_name": "",      # Optional for local prints
-                "file": filename,
                 "url": ftp_url,
-                "md5": "",               # Empty for local prints
-                "timelapse": True,       # Enable timelapse
-                "bed_type": "auto",      # Use "auto" for local prints
-                "bed_levelling": bed_leveling,  # Note: British spelling required
+                "bed_type": "auto",
+                "timelapse": True,
+                "bed_leveling": bed_leveling,  # Single 'l' per ha-bambulab
                 "flow_cali": flow_calibration,
                 "vibration_cali": vibration_calibration,
                 "layer_inspect": True,
                 "use_ams": use_ams,
-                "ams_mapping": "" if not use_ams or not ams_mapping else ams_mapping,
-                "sequence_id": "0"
+                "ams_mapping": list(ams_mapping) if ams_mapping else [0],
+                "subtask_name": subtask_name,
+                "profile_id": "0",
+                "project_id": "0",
+                "subtask_id": "0",
+                "task_id": "0",
             }
         }
         self.publish(command)
-        logger.info(f"Sent start_print_3mf command: file={filename}, url={ftp_url}, plate={plate_location}, full_command={command}")
+        logger.info(f"Sent start_print_3mf command: file={filename}, url={ftp_url}, plate={plate_location}, subtask={subtask_name}")
     
     def get_last_data(self) -> Dict:
         """Get the most recent data received"""

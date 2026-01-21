@@ -61,8 +61,40 @@ user_uid = None  # Cached user UID
 
 # Completed jobs tracking
 completed_jobs = []  # List of completed print jobs
-MAX_COMPLETED_JOBS = 50  # Maximum number of completed jobs to keep
+MAX_COMPLETED_JOBS = 100  # Maximum number of completed jobs to keep
 job_states = {}  # device_id -> last known gcode_state
+
+# Print history (persistent)
+print_history = []  # Full print history with stats
+MAX_PRINT_HISTORY = 500  # Keep last 500 prints
+HISTORY_FILE = '/tmp/scube_print_history.json'
+
+# Error tracking
+printer_errors = {}  # device_id -> list of recent errors
+
+
+def load_print_history():
+    """Load print history from file."""
+    global print_history
+    import json
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, 'r') as f:
+                print_history = json.load(f)
+                logger.info(f"Loaded {len(print_history)} print history entries")
+    except Exception as e:
+        logger.error(f"Failed to load print history: {e}")
+        print_history = []
+
+
+def save_print_history():
+    """Save print history to file."""
+    import json
+    try:
+        with open(HISTORY_FILE, 'w') as f:
+            json.dump(print_history[-MAX_PRINT_HISTORY:], f)
+    except Exception as e:
+        logger.error(f"Failed to save print history: {e}")
 
 
 def get_user_uid():
@@ -127,17 +159,29 @@ def detect_job_completion(device_id, old_state, new_state, print_data):
             'file_name': print_data.get('subtask_name') or print_data.get('gcode_file') or 'Unknown',
             'progress': print_data.get('mc_percent', 100),
             'total_layers': print_data.get('total_layer_num', 0),
-            'print_time': print_data.get('print_time', 0),
+            'print_time': print_data.get('print_time', 0),  # Minutes actually printed
             'dismissed': False,
             'logged': False,
+            # Additional tracking data
+            'error_code': print_data.get('print_error') if new_state == 'FAILED' else None,
+            'print_error': print_data.get('print_error'),
+            'gcode_state': new_state,
         }
         
-        # Add to completed jobs list
+        # Add to completed jobs list (for notifications)
         completed_jobs.insert(0, job)
         
         # Trim list if too long
         if len(completed_jobs) > MAX_COMPLETED_JOBS:
             completed_jobs = completed_jobs[:MAX_COMPLETED_JOBS]
+        
+        # Also add to print history (persistent)
+        history_entry = {
+            **job,
+            'id': f"hist_{device_id}_{int(time.time())}",
+        }
+        print_history.insert(0, history_entry)
+        save_print_history()
         
         logger.info(f"Job completed: {job['file_name']} on {device_id} ({new_state})")
 
@@ -165,6 +209,23 @@ def mqtt_message_handler(device_id):
                     # State changed - check for job completion
                     detect_job_completion(device_id, old_state, new_state, data['print'])
                     job_states[device_id] = new_state
+                
+                # Track errors (HMS = Health Management System)
+                hms_errors = data['print'].get('hms', [])
+                if hms_errors:
+                    if device_id not in printer_errors:
+                        printer_errors[device_id] = []
+                    for hms in hms_errors:
+                        error_entry = {
+                            'timestamp': time.time(),
+                            'code': hms.get('attr'),
+                            'level': hms.get('code'),  # 1=fatal, 2=serious, 3=common, 4=info
+                            'raw': hms,
+                        }
+                        printer_errors[device_id].insert(0, error_entry)
+                        # Keep only last 20 errors per device
+                        printer_errors[device_id] = printer_errors[device_id][:20]
+                        logger.warning(f"Printer error on {device_id}: {hms}")
                 
                 # Merge new print fields into existing
                 for key, value in data['print'].items():
@@ -287,20 +348,25 @@ def start_mqtt_session(device_id: str) -> dict:
 def index():
     """API info endpoint."""
     pending_jobs = len([j for j in completed_jobs if not j.get('dismissed')])
+    total_errors = sum(len(errs) for errs in printer_errors.values())
     return jsonify({
         'name': 'SCUBE Bambu Lab MQTT Proxy',
-        'version': '1.1.0',
+        'version': '1.2.0',
         'status': 'running',
         'configured': bool(BAMBU_TOKEN),
         'active_sessions': len(mqtt_sessions),
         'pending_completed_jobs': pending_jobs,
+        'total_errors': total_errors,
+        'print_history_count': len(print_history),
         'endpoints': {
             'health': '/health',
             'devices': '/api/devices',
             'realtime_start': '/api/realtime/start',
             'realtime_data': '/api/realtime/<device_id>',
             'all_status': '/api/status/all',
-            'completed_jobs': '/api/completed-jobs'
+            'completed_jobs': '/api/completed-jobs',
+            'print_history': '/api/print-history',
+            'errors': '/api/errors',
         }
     })
 
@@ -673,12 +739,112 @@ def mark_job_logged(job_id):
     return jsonify({'error': 'Job not found'}), 404
 
 
+@app.route('/api/print-history', methods=['GET'])
+@limiter.limit("30 per minute")
+def get_print_history():
+    """
+    Get print history with optional filtering.
+    Query params:
+      - device_id: Filter by device
+      - status: Filter by status (success/failed)
+      - limit: Number of records (default 50)
+      - offset: Offset for pagination
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    device_filter = request.args.get('device_id')
+    status_filter = request.args.get('status')
+    limit = int(request.args.get('limit', 50))
+    offset = int(request.args.get('offset', 0))
+    
+    # Apply filters
+    filtered = print_history
+    if device_filter:
+        filtered = [j for j in filtered if j.get('device_id') == device_filter]
+    if status_filter:
+        filtered = [j for j in filtered if j.get('status') == status_filter]
+    
+    # Calculate stats
+    total = len(filtered)
+    success_count = len([j for j in filtered if j.get('status') == 'success'])
+    failed_count = len([j for j in filtered if j.get('status') == 'failed'])
+    total_print_time = sum(j.get('print_time', 0) for j in filtered)
+    
+    # Paginate
+    paginated = filtered[offset:offset + limit]
+    
+    return jsonify({
+        'success': True,
+        'history': paginated,
+        'total': total,
+        'limit': limit,
+        'offset': offset,
+        'stats': {
+            'total_prints': total,
+            'successful': success_count,
+            'failed': failed_count,
+            'success_rate': round(success_count / total * 100, 1) if total > 0 else 0,
+            'total_print_time_minutes': total_print_time,
+        },
+        'timestamp': time.time()
+    })
+
+
+@app.route('/api/errors', methods=['GET'])
+@limiter.limit("60 per minute")
+def get_errors():
+    """Get recent errors for all or specific device."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    device_filter = request.args.get('device_id')
+    
+    if device_filter:
+        errors = printer_errors.get(device_filter, [])
+    else:
+        # Combine all errors
+        errors = []
+        for device_id, device_errors in printer_errors.items():
+            for err in device_errors:
+                errors.append({**err, 'device_id': device_id})
+        errors.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+    
+    return jsonify({
+        'success': True,
+        'errors': errors[:50],  # Limit to 50 most recent
+        'count': len(errors),
+        'timestamp': time.time()
+    })
+
+
+@app.route('/api/errors/<device_id>/clear', methods=['POST'])
+@limiter.limit("30 per minute")
+def clear_device_errors(device_id):
+    """Clear errors for a specific device."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if device_id in printer_errors:
+        cleared = len(printer_errors[device_id])
+        printer_errors[device_id] = []
+        return jsonify({
+            'success': True,
+            'message': f'Cleared {cleared} errors for {device_id}'
+        })
+    
+    return jsonify({'success': True, 'message': 'No errors to clear'})
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
 
 def main():
     """Main entry point."""
+    # Load persistent data
+    load_print_history()
+    
     # Validate configuration
     if not BAMBU_TOKEN:
         logger.warning("BAMBU_TOKEN not set! API will not work.")

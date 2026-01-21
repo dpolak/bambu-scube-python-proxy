@@ -340,12 +340,12 @@ class MQTTClient:
                 "md5": "",               # Empty for local prints
                 "timelapse": True,       # Enable timelapse
                 "bed_type": "auto",      # Use "auto" for local prints
-                "bed_leveling": bed_leveling,
+                "bed_levelling": bed_leveling,  # Note: British spelling required
                 "flow_cali": flow_calibration,
                 "vibration_cali": vibration_calibration,
-                "layer_inspect": False,
+                "layer_inspect": True,
                 "use_ams": use_ams,
-                "ams_mapping": list(ams_mapping) if ams_mapping else [],
+                "ams_mapping": "" if not use_ams or not ams_mapping else ams_mapping,
                 "sequence_id": "0"
             }
         }

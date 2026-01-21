@@ -318,13 +318,16 @@ class MQTTClient:
         else:
             plate_location = plate_number
         
-        # Build the FTP URL - this should point to the file on the printer
-        # Files are typically stored at ftp:///cache/filename.3mf
+        # Build the URL - for most printers (X1, P1, A1) use file:///sdcard/
+        # Only H2 series uses ftp:///
+        # Files are typically in cache/ folder
         if not filename.startswith('cache/') and not filename.startswith('/'):
             # If filename doesn't have a path prefix, assume it's in cache
-            ftp_url = f"ftp:///cache/{filename}"
+            file_url = f"file:///sdcard/cache/{filename}"
+        elif filename.startswith('/'):
+            file_url = f"file:///sdcard{filename}"
         else:
-            ftp_url = f"ftp:///{filename}"
+            file_url = f"file:///sdcard/{filename}"
         
         # Extract subtask name from filename (without path and extension)
         import os
@@ -339,7 +342,7 @@ class MQTTClient:
                 "sequence_id": 0,        # Integer, not string!
                 "command": "project_file",
                 "param": plate_location,
-                "url": ftp_url,
+                "url": file_url,
                 "bed_type": "auto",
                 "timelapse": True,
                 "bed_leveling": bed_leveling,  # Single 'l' per ha-bambulab
@@ -356,7 +359,7 @@ class MQTTClient:
             }
         }
         self.publish(command)
-        logger.info(f"Sent start_print_3mf command: file={filename}, url={ftp_url}, plate={plate_location}, subtask={subtask_name}")
+        logger.info(f"Sent start_print_3mf command: file={filename}, url={file_url}, plate={plate_location}, subtask={subtask_name}")
     
     def get_last_data(self) -> Dict:
         """Get the most recent data received"""

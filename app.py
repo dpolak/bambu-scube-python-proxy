@@ -786,6 +786,7 @@ def get_all_status():
                         'gcode_state': print_data.get('gcode_state'),
                         'print_type': print_data.get('print_type'),
                         'subtask_name': print_data.get('subtask_name'),
+                        'gcode_file': print_data.get('gcode_file'),  # For local reprint
                         'print_stage': print_data.get('mc_print_stage'),
                         
                         # Fans (0-15 scale, convert to percentage)

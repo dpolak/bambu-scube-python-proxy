@@ -696,6 +696,7 @@ def get_realtime(device_id):
             'gcode_state': print_data.get('gcode_state'),
             'print_type': print_data.get('print_type'),
             'subtask_name': print_data.get('subtask_name'),
+            'gcode_file': print_data.get('gcode_file'),  # Full filename with extension
             # Fans
             'cooling_fan': print_data.get('cooling_fan_speed'),
             'heatbreak_fan': print_data.get('heatbreak_fan_speed'),

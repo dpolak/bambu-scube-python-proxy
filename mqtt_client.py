@@ -305,17 +305,19 @@ class MQTTClient:
         if ams_mapping is None:
             ams_mapping = [0]
         
-        # Normalize filename - the file on printer's SD card may be in 'cache/' folder
-        # but the project_file command expects the full path including 'cache/'
+        import os
         original_filename = filename
         
         # Log the original filename for debugging
         logger.info(f"start_print_3mf called with filename: {original_filename}")
         
+        # Determine file location based on filename pattern:
+        # - gcode_file like "model.gcode.3mf" (no path) = LAN print, file in ROOT
+        # - gcode_file like "data/Metadata/..." = Cloud print, use subtask_name in CACHE
+        # - filename already has path like "cache/..." = use as-is
+        
         # Ensure filename has .3mf extension (MQTT subtask_name often lacks extension)
-        # Common patterns: "model" -> "model.gcode.3mf", "model.3mf" -> "model.3mf"
         if not filename.lower().endswith('.3mf'):
-            # Add .gcode.3mf extension (standard Bambu format)
             filename = f"{filename}.gcode.3mf"
             logger.info(f"Added .gcode.3mf extension: {filename}")
         
@@ -326,18 +328,19 @@ class MQTTClient:
             plate_location = plate_number
         
         # Build the URL - for most printers (X1, P1, A1) use file:///sdcard/
-        # Only H2 series uses ftp:///
-        # Files are typically in cache/ folder
-        if not filename.startswith('cache/') and not filename.startswith('/'):
-            # If filename doesn't have a path prefix, assume it's in cache
-            file_url = f"file:///sdcard/cache/{filename}"
+        # Key insight from ha-bambulab:
+        # - LAN prints: file is in ROOT (e.g., /model.gcode.3mf)
+        # - Cloud prints: file is in CACHE (e.g., /cache/model.3mf)
+        # If filename already has path prefix (cache/, /), use it. Otherwise use ROOT.
+        if filename.startswith('cache/'):
+            file_url = f"file:///sdcard/{filename}"
         elif filename.startswith('/'):
             file_url = f"file:///sdcard{filename}"
         else:
+            # No path prefix - file is in ROOT (typical for LAN prints)
             file_url = f"file:///sdcard/{filename}"
         
         # Extract subtask name from filename - keep full basename (matching ha-bambulab)
-        import os
         subtask_name = os.path.basename(filename)
         
         # Build command matching ha-bambulab's PRINT_PROJECT_FILE_TEMPLATE

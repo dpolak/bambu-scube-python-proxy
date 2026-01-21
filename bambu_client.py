@@ -84,3 +84,57 @@ class BambuClient:
     def get_user_profile(self) -> Dict:
         """Get user profile with UID."""
         return self.get('v1/user-service/my/profile')
+    
+    def get_tasks(self, device_id: str = None, limit: int = 20) -> List[Dict]:
+        """Get user's print tasks/history."""
+        params = {'limit': limit}
+        if device_id:
+            params['deviceId'] = device_id
+        response = self.get('v1/user-service/my/tasks', params=params)
+        return response.get('tasks', [])
+    
+    def get_cloud_files(self) -> List[Dict]:
+        """Get list of cloud files available for printing."""
+        # Try projects endpoint
+        try:
+            response = self.get('v1/user-service/my/projects')
+            projects = response.get('projects', [])
+            files = []
+            for p in projects:
+                files.append({
+                    'id': p.get('id'),
+                    'name': p.get('name') or p.get('title'),
+                    'type': 'project',
+                    'model_id': p.get('model_id'),
+                    'source': 'projects'
+                })
+            return files
+        except:
+            return []
+    
+    def start_cloud_print(
+        self,
+        device_id: str,
+        task_id: str = None,
+        model_id: str = None,
+        profile_id: str = None
+    ) -> Dict:
+        """
+        Start a print job by re-printing a previous task.
+        
+        Args:
+            device_id: Target device serial number
+            task_id: Task ID from history (to reprint)
+            model_id: Model ID (for direct model print)
+            profile_id: Profile ID (slicing profile)
+        """
+        data = {'deviceId': device_id}
+        
+        if task_id:
+            data['taskId'] = task_id
+        if model_id:
+            data['modelId'] = model_id
+        if profile_id:
+            data['profileId'] = profile_id
+        
+        return self.post('v1/iot-service/api/user/task', data=data)

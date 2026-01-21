@@ -478,7 +478,7 @@ def index():
     total_errors = sum(len(errs) for errs in printer_errors.values())
     return jsonify({
         'name': 'SCUBE Bambu Lab MQTT Proxy',
-        'version': '1.2.0',
+        'version': '1.4.0',
         'status': 'running',
         'configured': bool(BAMBU_TOKEN),
         'active_sessions': len(mqtt_sessions),
@@ -499,6 +499,9 @@ def index():
             'control_stop': '/api/control/<device_id>/stop',
             'control_speed': '/api/control/<device_id>/speed',
             'control_light': '/api/control/<device_id>/light',
+            'tasks': '/api/tasks',
+            'quick_print': '/api/tasks/quick-print',
+            'cloud_files': '/api/files',
         }
     })
 
@@ -1132,6 +1135,133 @@ def set_light(device_id):
     except Exception as e:
         logger.error(f"Failed to set light on {device_id}: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================================
+# TASK HISTORY & QUICK PRINT ENDPOINTS
+# ============================================================================
+
+@app.route('/api/tasks', methods=['GET'])
+@limiter.limit("30 per minute")
+def get_tasks():
+    """Get print tasks/history from Bambu Cloud."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    device_id = request.args.get('device_id')
+    limit = int(request.args.get('limit', 20))
+    
+    try:
+        client = BambuClient(BAMBU_TOKEN)
+        tasks = client.get_tasks(device_id=device_id, limit=limit)
+        
+        # Format tasks for frontend
+        formatted = []
+        for task in tasks:
+            formatted.append({
+                'id': task.get('id'),
+                'task_id': task.get('id'),
+                'title': task.get('designTitle') or task.get('title') or 'Untitled',
+                'file_name': task.get('designTitle') or task.get('title'),
+                'device_id': task.get('deviceId'),
+                'device_name': task.get('deviceName'),
+                'status': task.get('status'),
+                'progress': task.get('progress', 0),
+                'start_time': task.get('startTime'),
+                'end_time': task.get('endTime'),
+                'cost_time': task.get('costTime', 0),  # seconds
+                'weight': task.get('weight', 0),  # grams
+                'cover': task.get('cover'),  # thumbnail URL
+                'model_id': task.get('modelId'),
+                'profile_id': task.get('profileId'),
+            })
+        
+        return jsonify({
+            'success': True,
+            'tasks': formatted,
+            'count': len(formatted),
+            'timestamp': time.time()
+        })
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to get tasks: {e}")
+        return jsonify({'error': str(e)}), 502
+
+
+@app.route('/api/tasks/quick-print', methods=['POST'])
+@limiter.limit("10 per minute")
+def quick_print():
+    """Start a print by reprinting a previous task on a target device."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    data = request.get_json() or {}
+    task_id = data.get('task_id')
+    target_device_id = data.get('device_id')
+    model_id = data.get('model_id')
+    profile_id = data.get('profile_id')
+    
+    if not target_device_id:
+        return jsonify({'error': 'device_id is required'}), 400
+    
+    if not task_id and not model_id:
+        return jsonify({'error': 'task_id or model_id is required'}), 400
+    
+    try:
+        client = BambuClient(BAMBU_TOKEN)
+        result = client.start_cloud_print(
+            device_id=target_device_id,
+            task_id=task_id,
+            model_id=model_id,
+            profile_id=profile_id
+        )
+        
+        logger.info(f"Quick print triggered: task={task_id}, device={target_device_id}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Print job started on {target_device_id}',
+            'task_id': task_id,
+            'model_id': model_id,
+            'device_id': target_device_id,
+            'result': result
+        })
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to start quick print: {e}")
+        return jsonify({'error': str(e)}), 502
+
+
+@app.route('/api/files', methods=['GET'])
+@limiter.limit("30 per minute")
+def get_cloud_files():
+    """Get available cloud files for printing."""
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured'}), 500
+    
+    try:
+        client = BambuClient(BAMBU_TOKEN)
+        files = client.get_cloud_files()
+        
+        return jsonify({
+            'success': True,
+            'files': files,
+            'count': len(files),
+            'timestamp': time.time()
+        })
+        
+    except BambuAPIError as e:
+        logger.error(f"Failed to get cloud files: {e}")
+        return jsonify({'error': str(e)}), 502
 
 
 # ============================================================================

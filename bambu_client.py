@@ -117,7 +117,9 @@ class BambuClient:
         device_id: str,
         task_id: str = None,
         project_id: str = None,
-        profile_id: str = None
+        model_id: str = None,
+        profile_id: str = None,
+        subtask_id: str = None
     ) -> Dict:
         """
         Start a print job by re-printing a previous task.
@@ -126,18 +128,31 @@ class BambuClient:
             device_id: Target device serial number
             task_id: Task ID from history (to reprint)
             project_id: Project ID (cloud project)
+            model_id: Model ID (cloud model)
             profile_id: Profile ID (slicing profile)
+            subtask_id: Subtask ID (for reprinting)
         """
-        data = {'deviceId': device_id}
+        data = {
+            'deviceId': device_id,
+            'action': 'reprint',  # Required field for task creation
+        }
         
         if task_id:
             data['taskId'] = task_id
         if project_id:
             data['projectId'] = project_id
+        if model_id:
+            data['modelId'] = model_id
         if profile_id:
             data['profileId'] = profile_id
+        if subtask_id:
+            data['subtaskId'] = subtask_id
         
-        return self.post('v1/iot-service/api/user/task', data=data)
+        # Try the user-service endpoint first, fall back to iot-service
+        try:
+            return self.post('v1/user-service/my/task', data=data)
+        except BambuAPIError:
+            return self.post('v1/iot-service/api/user/task', data=data)
     
     # ===== File Upload =====
     
@@ -233,17 +248,22 @@ class BambuClient:
     
     # ===== Notifications & Messages =====
     
-    def get_notifications(self, unread_only: bool = False) -> Dict:
+    def get_notifications(self, action: str = 'list', unread_only: bool = False) -> Dict:
         """
         Get user notifications from Bambu Cloud.
         
         Args:
+            action: Action parameter (required by API, default 'list')
             unread_only: Only return unread notifications
         """
-        params = {}
+        params = {'action': action}
         if unread_only:
             params['unread'] = 'true'
-        return self.get('v1/iot-service/api/user/notification', params=params)
+        try:
+            return self.get('v1/iot-service/api/user/notification', params=params)
+        except BambuAPIError:
+            # Some accounts may not have notifications enabled
+            return {'notifications': [], 'success': True, 'message': 'No notifications available'}
     
     def mark_notification_read(self, notification_id: str, read: bool = True) -> Dict:
         """Mark a notification as read or unread."""

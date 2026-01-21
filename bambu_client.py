@@ -116,7 +116,7 @@ class BambuClient:
         self,
         device_id: str,
         task_id: str = None,
-        model_id: str = None,
+        project_id: str = None,
         profile_id: str = None
     ) -> Dict:
         """
@@ -125,15 +125,15 @@ class BambuClient:
         Args:
             device_id: Target device serial number
             task_id: Task ID from history (to reprint)
-            model_id: Model ID (for direct model print)
+            project_id: Project ID (cloud project)
             profile_id: Profile ID (slicing profile)
         """
         data = {'deviceId': device_id}
         
         if task_id:
             data['taskId'] = task_id
-        if model_id:
-            data['modelId'] = model_id
+        if project_id:
+            data['projectId'] = project_id
         if profile_id:
             data['profileId'] = profile_id
         

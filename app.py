@@ -270,6 +270,11 @@ def detect_job_completion(device_id, old_state, new_state, print_data):
             'error_code': print_data.get('print_error') if new_state == 'FAILED' else None,
             'print_error': print_data.get('print_error'),
             'gcode_state': new_state,
+            # Cloud reprint IDs (from active_jobs cache or print_data)
+            'project_id': active_jobs.get(device_id, {}).get('project_id') or print_data.get('project_id'),
+            'task_id': active_jobs.get(device_id, {}).get('task_id') or print_data.get('task_id'),
+            'subtask_id': active_jobs.get(device_id, {}).get('subtask_id') or print_data.get('subtask_id'),
+            'profile_id': active_jobs.get(device_id, {}).get('profile_id') or print_data.get('profile_id'),
         }
         
         # Add to completed jobs list (for notifications)
@@ -325,6 +330,20 @@ def mqtt_message_handler(device_id):
                         if 'start_time' not in active_jobs[device_id]:
                             active_jobs[device_id]['start_time'] = time.time()
                             logger.info(f"Active job started on {device_id}: {file_name}")
+                
+                # Cache project/task IDs for reprint functionality
+                if device_id not in active_jobs:
+                    active_jobs[device_id] = {}
+                
+                # Store these IDs whenever we see them (they persist during a print)
+                if data['print'].get('project_id'):
+                    active_jobs[device_id]['project_id'] = data['print'].get('project_id')
+                if data['print'].get('task_id'):
+                    active_jobs[device_id]['task_id'] = data['print'].get('task_id')
+                if data['print'].get('subtask_id'):
+                    active_jobs[device_id]['subtask_id'] = data['print'].get('subtask_id')
+                if data['print'].get('profile_id'):
+                    active_jobs[device_id]['profile_id'] = data['print'].get('profile_id')
                 
                 # Check for state transition BEFORE merging
                 old_state = job_states.get(device_id)
@@ -1144,19 +1163,70 @@ def set_light(device_id):
 @app.route('/api/tasks', methods=['GET'])
 @limiter.limit("30 per minute")
 def get_tasks():
-    """Get print tasks/history from Bambu Cloud."""
+    """Get print tasks from local history (for quick reprint)."""
     if not verify_api_key():
         return jsonify({'error': 'Unauthorized'}), 401
     
-    if not BAMBU_TOKEN:
-        return jsonify({'error': 'Bambu token not configured'}), 500
-    
-    device_id = request.args.get('device_id')
+    device_filter = request.args.get('device_id')
     limit = int(request.args.get('limit', 20))
+    source = request.args.get('source', 'local')  # 'local' or 'cloud'
+    
+    # Use local print history (faster, shows our completed prints)
+    if source == 'local':
+        tasks = print_history[:limit]
+        
+        # Filter by device if specified
+        if device_filter:
+            tasks = [t for t in tasks if t.get('device_id') == device_filter][:limit]
+        
+        # Format for frontend
+        formatted = []
+        for job in tasks:
+            # Only include successful prints with reprint IDs
+            if job.get('status') != 'success':
+                continue
+            
+            # Format timestamp
+            completed_at = job.get('completed_at', 0)
+            date_str = ''
+            if completed_at:
+                from datetime import datetime
+                dt = datetime.fromtimestamp(completed_at)
+                date_str = dt.strftime('%d %b %H:%M')
+            
+            formatted.append({
+                'id': job.get('id'),
+                'title': job.get('file_name', 'Nieznany'),
+                'file_name': job.get('file_name'),
+                'device_id': job.get('device_id'),
+                'device_name': job.get('device_name') or job.get('device_id', '')[:12],
+                'status': job.get('status'),
+                'end_time': date_str,
+                'cost_time': job.get('print_duration', 0),
+                'cover': None,  # We don't have thumbnails in local history
+                # Reprint IDs
+                'project_id': job.get('project_id'),
+                'task_id': job.get('task_id'),
+                'subtask_id': job.get('subtask_id'),
+                'profile_id': job.get('profile_id'),
+                'has_reprint_ids': bool(job.get('task_id') or job.get('project_id')),
+            })
+        
+        return jsonify({
+            'success': True,
+            'tasks': formatted,
+            'count': len(formatted),
+            'source': 'local',
+            'timestamp': time.time()
+        })
+    
+    # Fallback to cloud tasks if requested
+    if not BAMBU_TOKEN:
+        return jsonify({'error': 'Bambu token not configured for cloud tasks'}), 500
     
     try:
         client = BambuClient(BAMBU_TOKEN)
-        tasks = client.get_tasks(device_id=device_id, limit=limit)
+        tasks = client.get_tasks(device_id=device_filter, limit=limit)
         
         # Format tasks for frontend
         formatted = []
@@ -1172,22 +1242,24 @@ def get_tasks():
                 'progress': task.get('progress', 0),
                 'start_time': task.get('startTime'),
                 'end_time': task.get('endTime'),
-                'cost_time': task.get('costTime', 0),  # seconds
-                'weight': task.get('weight', 0),  # grams
-                'cover': task.get('cover'),  # thumbnail URL
+                'cost_time': task.get('costTime', 0),
+                'weight': task.get('weight', 0),
+                'cover': task.get('cover'),
                 'model_id': task.get('modelId'),
                 'profile_id': task.get('profileId'),
+                'has_reprint_ids': True,
             })
         
         return jsonify({
             'success': True,
             'tasks': formatted,
             'count': len(formatted),
+            'source': 'cloud',
             'timestamp': time.time()
         })
         
     except BambuAPIError as e:
-        logger.error(f"Failed to get tasks: {e}")
+        logger.error(f"Failed to get cloud tasks: {e}")
         return jsonify({'error': str(e)}), 502
 
 
@@ -1204,31 +1276,31 @@ def quick_print():
     data = request.get_json() or {}
     task_id = data.get('task_id')
     target_device_id = data.get('device_id')
-    model_id = data.get('model_id')
+    project_id = data.get('project_id')
     profile_id = data.get('profile_id')
     
     if not target_device_id:
         return jsonify({'error': 'device_id is required'}), 400
     
-    if not task_id and not model_id:
-        return jsonify({'error': 'task_id or model_id is required'}), 400
+    if not task_id and not project_id:
+        return jsonify({'error': 'task_id or project_id is required for reprinting'}), 400
     
     try:
         client = BambuClient(BAMBU_TOKEN)
         result = client.start_cloud_print(
             device_id=target_device_id,
             task_id=task_id,
-            model_id=model_id,
+            project_id=project_id,
             profile_id=profile_id
         )
         
-        logger.info(f"Quick print triggered: task={task_id}, device={target_device_id}")
+        logger.info(f"Quick print triggered: task={task_id}, project={project_id}, device={target_device_id}")
         
         return jsonify({
             'success': True,
             'message': f'Print job started on {target_device_id}',
             'task_id': task_id,
-            'model_id': model_id,
+            'project_id': project_id,
             'device_id': target_device_id,
             'result': result
         })

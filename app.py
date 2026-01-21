@@ -214,10 +214,17 @@ def verify_api_key():
     return api_key == SCUBE_API_KEY
 
 
-def detect_job_completion(device_id, old_state, new_state, print_data):
+def detect_job_completion(device_id, old_state, new_state, print_data, is_initial=False):
     """
     Detect when a print job completes and store it.
     Triggers when state changes from RUNNING/PAUSE to FINISH/FAILED.
+    
+    Args:
+        device_id: Printer device ID
+        old_state: Previous gcode_state
+        new_state: Current gcode_state  
+        print_data: Print data from MQTT
+        is_initial: If True, capture already-finished prints on session start
     """
     global completed_jobs, active_jobs
     
@@ -230,6 +237,14 @@ def detect_job_completion(device_id, old_state, new_state, print_data):
     # Detect completion: was printing/paused, now finished/failed
     was_active = old_state in ('RUNNING', 'PAUSE', 'ACTIVE', 'PRINTING')
     is_done = new_state in ('FINISH', 'FINISHED', 'FAILED', 'SUCCESS')
+    
+    # On initial connect, also capture prints that are already finished
+    # This handles the case where the dashboard starts after a print completed
+    if is_initial and is_done:
+        # Check if we have a valid file name (indicates a completed print worth capturing)
+        file_name = print_data.get('subtask_name') or print_data.get('gcode_file') or ''
+        if file_name and file_name.lower() not in ('', 'unknown', 'none'):
+            was_active = True  # Treat as if we saw the transition
     
     if was_active and is_done:
         # Get device name from session or use ID
@@ -275,6 +290,8 @@ def detect_job_completion(device_id, old_state, new_state, print_data):
             'task_id': active_jobs.get(device_id, {}).get('task_id') or print_data.get('task_id'),
             'subtask_id': active_jobs.get(device_id, {}).get('subtask_id') or print_data.get('subtask_id'),
             'profile_id': active_jobs.get(device_id, {}).get('profile_id') or print_data.get('profile_id'),
+            # MQTT reprint info (for local/SD card prints)
+            'gcode_file': active_jobs.get(device_id, {}).get('gcode_file') or print_data.get('gcode_file'),
         }
         
         # Add to completed jobs list (for notifications)
@@ -331,6 +348,13 @@ def mqtt_message_handler(device_id):
                             active_jobs[device_id]['start_time'] = time.time()
                             logger.info(f"Active job started on {device_id}: {file_name}")
                 
+                # Store gcode_file path for MQTT-based reprinting
+                gcode_file = data['print'].get('gcode_file')
+                if gcode_file and gcode_file.lower() not in ('', 'unknown', 'none'):
+                    if device_id not in active_jobs:
+                        active_jobs[device_id] = {}
+                    active_jobs[device_id]['gcode_file'] = gcode_file
+                
                 # Cache project/task IDs for reprint functionality
                 if device_id not in active_jobs:
                     active_jobs[device_id] = {}
@@ -349,9 +373,16 @@ def mqtt_message_handler(device_id):
                 old_state = job_states.get(device_id)
                 new_state = data['print'].get('gcode_state')
                 
+                # Detect if this is the first message for this device (initial connect)
+                is_initial_message = job_states.get(device_id) is None
+                
                 if new_state and new_state != old_state:
                     # State changed - check for job completion
-                    detect_job_completion(device_id, old_state, new_state, data['print'])
+                    detect_job_completion(device_id, old_state, new_state, data['print'], is_initial=is_initial_message)
+                    job_states[device_id] = new_state
+                elif is_initial_message and new_state:
+                    # First message after session started - capture finished print if present
+                    detect_job_completion(device_id, old_state, new_state, data['print'], is_initial=True)
                     job_states[device_id] = new_state
                 
                 # Track errors (HMS = Health Management System)
@@ -497,7 +528,7 @@ def index():
     total_errors = sum(len(errs) for errs in printer_errors.values())
     return jsonify({
         'name': 'SCUBE Bambu Lab MQTT Proxy',
-        'version': '1.6.0',
+        'version': '1.7.0',
         'status': 'running',
         'configured': bool(BAMBU_TOKEN),
         'active_sessions': len(mqtt_sessions),
@@ -527,6 +558,7 @@ def index():
             'camera': '/api/camera/<device_id>',
             'tasks': '/api/tasks',
             'quick_print': '/api/tasks/quick-print',
+            'local_reprint': '/api/tasks/local-reprint',
             'cloud_files': '/api/files',
             'upload': '/api/upload',
             'upload_url': '/api/upload/url',
@@ -1477,12 +1509,15 @@ def get_tasks():
                 'end_time': date_str,
                 'cost_time': job.get('print_duration', 0),
                 'cover': None,  # We don't have thumbnails in local history
-                # Reprint IDs
+                # Reprint IDs (Cloud API)
                 'project_id': job.get('project_id'),
                 'task_id': job.get('task_id'),
                 'subtask_id': job.get('subtask_id'),
                 'profile_id': job.get('profile_id'),
                 'has_reprint_ids': bool(job.get('task_id') or job.get('project_id')),
+                # Local reprint info (MQTT)
+                'gcode_file': job.get('gcode_file'),
+                'has_local_reprint': bool(job.get('gcode_file')),
             })
         
         return jsonify({
@@ -1581,6 +1616,91 @@ def quick_print():
     except BambuAPIError as e:
         logger.error(f"Failed to start quick print: {e}")
         return jsonify({'error': str(e)}), 502
+
+
+@app.route('/api/tasks/local-reprint', methods=['POST'])
+@limiter.limit("10 per minute")
+def local_reprint():
+    """
+    Reprint a local/SD card file via MQTT command.
+    This is for reprinting files that were printed from the printer's storage,
+    not from Bambu Cloud.
+    
+    Request JSON:
+        device_id: Target printer device ID
+        gcode_file: File path from completed job (e.g., 'model.3mf')
+        plate_number: (optional) Plate number to print, default 1
+        use_ams: (optional) Use AMS, default True
+        ams_mapping: (optional) AMS slot mapping, default [0]
+        bed_leveling: (optional) Enable bed leveling, default True
+        flow_calibration: (optional) Enable flow calibration, default True
+        bed_type: (optional) Bed type, default 'textured_plate'
+    
+    Returns:
+        JSON with success status
+    """
+    if not verify_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    data = request.get_json() or {}
+    device_id = data.get('device_id')
+    gcode_file = data.get('gcode_file')
+    
+    if not device_id:
+        return jsonify({'error': 'device_id is required'}), 400
+    
+    if not gcode_file:
+        return jsonify({'error': 'gcode_file is required for local reprint'}), 400
+    
+    # Check if we have an active MQTT session for this device
+    if device_id not in mqtt_sessions:
+        return jsonify({
+            'error': 'No active MQTT session for this device. Start monitoring first.',
+            'hint': 'Call /api/mqtt/start first to establish connection'
+        }), 400
+    
+    session = mqtt_sessions[device_id]
+    mqtt_client = session.get('client')
+    
+    if not mqtt_client or not mqtt_client.connected:
+        return jsonify({'error': 'MQTT client not connected'}), 500
+    
+    try:
+        # Extract parameters with defaults
+        plate_number = data.get('plate_number', 1)
+        use_ams = data.get('use_ams', True)
+        ams_mapping = data.get('ams_mapping', [0])
+        bed_leveling = data.get('bed_leveling', True)
+        flow_calibration = data.get('flow_calibration', True)
+        vibration_calibration = data.get('vibration_calibration', True)
+        bed_type = data.get('bed_type', 'textured_plate')
+        
+        # Send the print command via MQTT
+        mqtt_client.start_print_3mf(
+            filename=gcode_file,
+            plate_number=plate_number,
+            use_ams=use_ams,
+            ams_mapping=ams_mapping,
+            bed_leveling=bed_leveling,
+            flow_calibration=flow_calibration,
+            vibration_calibration=vibration_calibration,
+            bed_type=bed_type
+        )
+        
+        logger.info(f"Local reprint triggered: file={gcode_file}, device={device_id}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Reprint command sent for {gcode_file}',
+            'device_id': device_id,
+            'gcode_file': gcode_file,
+            'plate_number': plate_number,
+            'use_ams': use_ams
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to send local reprint command: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/files', methods=['GET'])

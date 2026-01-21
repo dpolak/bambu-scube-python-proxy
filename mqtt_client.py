@@ -273,6 +273,63 @@ class MQTTClient:
         self.publish(command)
         logger.info(f"Sent G-code: {gcode_line}")
     
+    def start_print_3mf(
+        self,
+        filename: str,
+        plate_number: int = 1,
+        use_ams: bool = True,
+        ams_mapping: list = None,
+        bed_leveling: bool = True,
+        flow_calibration: bool = True,
+        vibration_calibration: bool = True,
+        bed_type: str = "textured_plate"
+    ):
+        """
+        Start printing a 3MF file from the printer's storage (SD card/internal).
+        This is used for reprinting a previously completed local print.
+        
+        Args:
+            filename: Name of the 3MF file (e.g., 'model.3mf')
+            plate_number: Plate number to print (1-based) or full path like 'Metadata/plate_1.gcode'
+            use_ams: Whether to use AMS for filament
+            ams_mapping: AMS slot mapping [0] means slot 1, etc.
+            bed_leveling: Enable bed leveling before print
+            flow_calibration: Enable flow calibration
+            vibration_calibration: Enable vibration calibration
+            bed_type: Bed plate type ('textured_plate', 'cool_plate', 'eng_plate', 'high_temp_plate')
+        
+        Returns:
+            None (command is published async)
+        """
+        if ams_mapping is None:
+            ams_mapping = [0]
+        
+        # Build plate location path
+        if isinstance(plate_number, int):
+            plate_location = f"Metadata/plate_{plate_number}.gcode"
+        else:
+            plate_location = plate_number
+        
+        command = {
+            "print": {
+                "command": "project_file",
+                "param": plate_location,
+                "file": filename,
+                "bed_leveling": bed_leveling,
+                "bed_type": bed_type,
+                "flow_cali": flow_calibration,
+                "vibration_cali": vibration_calibration,
+                "url": f"ftp:///{filename}",
+                "layer_inspect": False,
+                "sequence_id": "0",
+                "use_ams": use_ams,
+                "ams_mapping": list(ams_mapping),
+                "skip_objects": None
+            }
+        }
+        self.publish(command)
+        logger.info(f"Sent start_print_3mf command for {filename} (plate {plate_number})")
+    
     def get_last_data(self) -> Dict:
         """Get the most recent data received"""
         return self.last_data.copy()

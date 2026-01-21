@@ -329,12 +329,9 @@ class MQTTClient:
         else:
             file_url = f"file:///sdcard/{filename}"
         
-        # Extract subtask name from filename (without path and extension)
+        # Extract subtask name from filename - keep full basename (matching ha-bambulab)
         import os
-        subtask_name = os.path.splitext(os.path.basename(filename))[0]
-        # Remove .gcode suffix if present (e.g., "model.gcode.3mf" -> "model")
-        if subtask_name.endswith('.gcode'):
-            subtask_name = subtask_name[:-6]
+        subtask_name = os.path.basename(filename)
         
         # Build command matching ha-bambulab's PRINT_PROJECT_FILE_TEMPLATE
         command = {

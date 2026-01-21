@@ -1661,18 +1661,39 @@ def local_reprint():
     if not filename:
         return jsonify({'error': 'subtask_name or gcode_file is required for local reprint'}), 400
     
-    # Check if we have an active MQTT session for this device
+    # Auto-start MQTT session if not active
     if device_id not in mqtt_sessions:
-        return jsonify({
-            'error': 'No active MQTT session for this device. Start monitoring first.',
-            'hint': 'Call /api/mqtt/start first to establish connection'
-        }), 400
+        logger.info(f"Auto-starting MQTT session for device {device_id} for local reprint")
+        result = start_mqtt_session(device_id)
+        if result.get('status') not in ['started', 'extended']:
+            return jsonify({
+                'error': 'Failed to start MQTT session',
+                'details': result
+            }), 500
+        # Wait for MQTT connection to establish
+        import time as time_module
+        time_module.sleep(3)
     
-    session = mqtt_sessions[device_id]
+    session = mqtt_sessions.get(device_id)
+    if not session:
+        return jsonify({'error': 'MQTT session failed to initialize'}), 500
+    
     mqtt_client = session.get('client')
     
-    if not mqtt_client or not mqtt_client.connected:
-        return jsonify({'error': 'MQTT client not connected'}), 500
+    if not mqtt_client:
+        return jsonify({'error': 'MQTT client not available'}), 500
+    
+    # Check connection with retry
+    if not mqtt_client.connected:
+        logger.warning(f"MQTT client not connected, waiting for connection...")
+        import time as time_module
+        for i in range(5):  # Wait up to 5 seconds
+            time_module.sleep(1)
+            if mqtt_client.connected:
+                break
+        
+        if not mqtt_client.connected:
+            return jsonify({'error': 'MQTT client failed to connect after waiting'}), 500
     
     try:
         # Extract parameters with defaults
